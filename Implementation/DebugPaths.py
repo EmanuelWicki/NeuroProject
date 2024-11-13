@@ -71,10 +71,17 @@ def generate_adjusted_expanded_surface(x, y, normals, expansion_length=0.05):
     return expanded_points[:, 0], expanded_points[:, 1]
 
 # Function to fit a line that connects the tips of the valid blue vectors without intersections
+from scipy.interpolate import splprep, splev
+
 def fit_direct_curve(expanded_x, expanded_y, skip_indices):
     # Only consider points that were not skipped
     valid_points = [(expanded_x[i], expanded_y[i]) for i in range(len(expanded_x)) if i not in skip_indices]
     valid_points = np.array(valid_points)
+    
+    # Use spline fitting to smooth the curve
+    tck, u = splprep([valid_points[:, 0], valid_points[:, 1]], s=0.0005)
+    smooth_x, smooth_y = splev(np.linspace(0, 1, 40000), tck)
+    return smooth_x, smooth_y
     return valid_points[:, 0], valid_points[:, 1]
 
 # Plotting function to visualize the adjusted expanded surface

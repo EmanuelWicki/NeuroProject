@@ -22,7 +22,7 @@ def generate_white_matter_boundary():
 # Function to compute outward normals of a closed 2D curve
 def compute_outward_normals(x, y):
     normals = []
-    centroid = np.array([np.mean(x), np.mean(y)])
+    centroid = np.array([np.mean(x), np.mean(y)])  # Centroid used for consistent normal direction
     for i in range(len(x)):
         # Compute tangent vector as difference between neighboring points
         next_idx = (i + 1) % len(x)
@@ -68,44 +68,6 @@ def find_ray_intersection(point, direction, boundary_points):
                 min_distance = distance
 
     return min_distance if min_distance != float('inf') else None
-
-# Remove intersecting points and simplify the surface
-def remove_intersecting_points(points):
-    simplified_points = []
-    skip_indices = set()
-    n = len(points)
-
-    for i in range(n):
-        if i in skip_indices:
-            continue
-
-        p1 = points[i]
-        p2 = points[(i + 1) % n]
-
-        # Check for intersections with other segments
-        for j in range(i + 2, n):
-            if (j + 1) % n == i:
-                continue  # Skip adjacent segments
-
-            p3 = points[j]
-            p4 = points[(j + 1) % n]
-
-            if line_segments_intersect(p1, p2, p3, p4):
-                # If intersecting, use the midpoint to define the new boundary and skip the intersecting segment
-                merged_point = (p1 + p2 + p3 + p4) / 4
-                simplified_points.append(merged_point)
-                skip_indices.update([i, (i + 1) % n, j, (j + 1) % n])
-                break
-        else:
-            simplified_points.append(p1)
-
-    return np.array(simplified_points)
-
-# Check if two line segments intersect
-def line_segments_intersect(p1, p2, p3, p4):
-    def ccw(a, b, c):
-        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-    return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
 
 # Initialize the ventricle and white matter boundary
 ventricle_x, ventricle_y = generate_ventricle_shape()
@@ -153,15 +115,12 @@ for step in range(num_iterations):
 
     new_ventricle_points = np.array(new_ventricle_points)
 
-    # Remove intersecting points to prevent crossovers and simplify the surface
-    simplified_points = remove_intersecting_points(new_ventricle_points)
-
     # Store the new points in paths
-    for i in range(len(simplified_points)):
-        paths[i, step + 1] = simplified_points[i]
+    for i in range(len(new_ventricle_points)):
+        paths[i, step + 1] = new_ventricle_points[i]
 
 # Set the filename to save the PDF in the same directory as this script
-pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_paths.pdf')
+pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_paths_corrected.pdf')
 
 # Save each path plot in a PDF
 with PdfPages(pdf_filename) as pdf:

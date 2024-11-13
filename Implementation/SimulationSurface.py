@@ -127,7 +127,7 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 100
+num_iterations = 10
 max_expansion_factor = 0.005  # Max expansion step for longer distances
 min_expansion_factor = 0.001  # Minimum step for shorter distances
 
