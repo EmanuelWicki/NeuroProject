@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.interpolate import splprep, splev
 
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
 def generate_ventricle_shape():
@@ -70,19 +71,17 @@ def generate_adjusted_expanded_surface(x, y, normals, expansion_length=0.05):
     expanded_points = np.array(expanded_points)
     return expanded_points[:, 0], expanded_points[:, 1]
 
-# Function to fit a line that connects the tips of the valid blue vectors without intersections
-from scipy.interpolate import splprep, splev
-
-def fit_direct_curve(expanded_x, expanded_y, skip_indices):
+# Function to fit a spline curve that connects the tips of the valid blue vectors without intersections
+def fit_spline_curve(expanded_x, expanded_y, skip_indices):
     # Only consider points that were not skipped
     valid_points = [(expanded_x[i], expanded_y[i]) for i in range(len(expanded_x)) if i not in skip_indices]
     valid_points = np.array(valid_points)
     
     # Use spline fitting to smooth the curve
-    tck, u = splprep([valid_points[:, 0], valid_points[:, 1]], s=0.0005)
-    smooth_x, smooth_y = splev(np.linspace(0, 1, 40000), tck)
+    tck, u = splprep([valid_points[:, 0], valid_points[:, 1]], s=0.0005, per=True)
+    smooth_x, smooth_y = splev(np.linspace(0, 1, 4000), tck)
+    
     return smooth_x, smooth_y
-    return valid_points[:, 0], valid_points[:, 1]
 
 # Plotting function to visualize the adjusted expanded surface
 def plot_expanded_surface(initial_x, initial_y, expanded_x, expanded_y, normals, expansion_length, skip_indices):
@@ -103,9 +102,9 @@ def plot_expanded_surface(initial_x, initial_y, expanded_x, expanded_y, normals,
         if i not in skip_indices:
             ax.plot([point[0], expanded_point[0]], [point[1], expanded_point[1]], color='blue', linestyle='--', linewidth=0.5)
     
-    # Fit and plot the direct curve to the tips of the blue vectors
-    fitted_x, fitted_y = fit_direct_curve(expanded_x, expanded_y, skip_indices)
-    ax.plot(fitted_x, fitted_y, color='green', linewidth=2, linestyle='-', label='Fitted Direct Curve')
+    # Fit and plot the spline curve to the tips of the blue vectors
+    fitted_x, fitted_y = fit_spline_curve(expanded_x, expanded_y, skip_indices)
+    ax.plot(fitted_x, fitted_y, color='green', linewidth=2, linestyle='-', label='Fitted Spline Curve')
     
     ax.set_xlim(-1.0, 1.0)
     ax.set_ylim(-1.0, 1.0)
