@@ -1,6 +1,8 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from scipy.interpolate import splprep, splev
+from PIL import Image
 import os
 
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
@@ -13,8 +15,9 @@ def generate_ventricle_shape():
 
 # Function to create the white matter boundary
 def generate_white_matter_boundary():
-    t = np.linspace(0, 2 * np.pi, 300)
-    r = 1 + 0.1 * np.sin(5 * t)  # Variations for a slightly irregular surface
+    t = np.linspace(0, 2 * np.pi, 600)  # Increase the number of points for smoother and more detailed boundary
+    r = (1.3 + 0.2 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
+         0.05 * np.cos(17 * t + 0.5))  # Add multiple sine and cosine components for complexity
     x = r * np.cos(t)
     y = r * np.sin(t)
     return x, y
@@ -69,44 +72,6 @@ def find_ray_intersection(point, direction, boundary_points):
 
     return min_distance if min_distance != float('inf') else None
 
-# Remove intersecting points and simplify the surface
-def remove_intersecting_points(points):
-    simplified_points = []
-    skip_indices = set()
-    n = len(points)
-
-    for i in range(n):
-        if i in skip_indices:
-            continue
-
-        p1 = points[i]
-        p2 = points[(i + 1) % n]
-
-        # Check for intersections with other segments
-        for j in range(i + 2, n):
-            if (j + 1) % n == i:
-                continue  # Skip adjacent segments
-
-            p3 = points[j]
-            p4 = points[(j + 1) % n]
-
-            if line_segments_intersect(p1, p2, p3, p4):
-                # If intersecting, use the midpoint to define the new boundary and skip the intersecting segment
-                merged_point = (p1 + p2 + p3 + p4) / 4
-                simplified_points.append(merged_point)
-                skip_indices.update([i, (i + 1) % n, j, (j + 1) % n])
-                break
-        else:
-            simplified_points.append(p1)
-
-    return np.array(simplified_points)
-
-# Check if two line segments intersect
-def line_segments_intersect(p1, p2, p3, p4):
-    def ccw(a, b, c):
-        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-    return ccw(p1, p3, p4) != ccw(p2, p3, p4) and ccw(p1, p2, p3) != ccw(p1, p2, p4)
-
 # Apply Laplacian smoothing to reduce sharp concavities without losing features
 def adaptive_laplacian_smoothing(x, y, alpha=0.005):
     smoothed_x = x.copy()
@@ -118,6 +83,13 @@ def adaptive_laplacian_smoothing(x, y, alpha=0.005):
         smoothed_y[i] = (1 - alpha) * y[i] + alpha * 0.5 * (y[prev_idx] + y[next_idx])
     return smoothed_x, smoothed_y
 
+# Function to interpolate points using a spline
+def interpolate_points(points, num_points=100):
+    tck, u = splprep([points[:, 0], points[:, 1]], s=0)
+    u_new = np.linspace(0, 1, num_points)
+    x_new, y_new = splev(u_new, tck)
+    return np.vstack((x_new, y_new)).T
+
 # Initialize the ventricle and white matter boundary
 ventricle_x, ventricle_y = generate_ventricle_shape()
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()  # Store initial structure for plotting
@@ -127,14 +99,16 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 10
-max_expansion_factor = 0.005  # Max expansion step for longer distances
-min_expansion_factor = 0.001  # Minimum step for shorter distances
+num_iterations = 2000
+max_expansion_factor = 0.0005  # Max expansion step for longer distances
+min_expansion_factor = 0.0001  # Minimum step for shorter distances
 
 # Set the filename to save the PDF in the same directory as this script
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
+gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion.gif')
+frames = []  # List to store frames for GIF
 
-# Save each step in a PDF
+# Save each step in a PDF and create frames for the GIF
 with PdfPages(pdf_filename) as pdf:
     for step in range(num_iterations):
         print(f"Processing step {step + 1}")  # Debug statement
@@ -157,7 +131,7 @@ with PdfPages(pdf_filename) as pdf:
             # If an intersection is found, expand by a fraction of the shortest distance
             if intersection_distance:
                 # Dynamic expansion based on the distance to white matter
-                expansion_distance = intersection_distance * 0.005
+                expansion_distance = intersection_distance * 0.0005
                 if expansion_distance < min_expansion_factor:
                     expansion_distance = min_expansion_factor
                 new_point = point + expansion_distance * normal
@@ -168,8 +142,12 @@ with PdfPages(pdf_filename) as pdf:
 
         new_ventricle_points = np.array(new_ventricle_points)
 
-        # Remove intersecting points to prevent crossovers and simplify the surface
-        simplified_points = remove_intersecting_points(new_ventricle_points)
+        # Ensure the expanded surface is closed by averaging the start and end point normals for the merged expansion
+        new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
+        new_ventricle_points[-1] = new_ventricle_points[0]
+
+        # Interpolate points to maintain a smooth curve
+        simplified_points = interpolate_points(new_ventricle_points)
 
         # Apply adaptive Laplacian smoothing to reduce sharp concavities
         ventricle_x, ventricle_y = adaptive_laplacian_smoothing(simplified_points[:, 0], simplified_points[:, 1])
@@ -187,12 +165,36 @@ with PdfPages(pdf_filename) as pdf:
         # Plot the current ventricle boundary as a fine line
         ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step + 1}')
 
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
+        # Plot the expansion vectors
+        for i in range(len(ventricle_x)):
+            if i == 0 or i == len(ventricle_x) - 1:
+                if i == 0:
+                    ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
+                             head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
+            else:
+                ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
+                         head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
+
+        ax.set_xlim(-2.5, 2.5)
+        ax.set_ylim(-2.5, 2.5)
         ax.set_aspect('equal')
         ax.set_title(f'Step {step + 1}')
         plt.legend()
         pdf.savefig()  # Save current figure to the PDF
+
+        # Save the current frame as an image for the GIF
+        frame_filename = f'frame_{step + 1}.png'
+        plt.savefig(frame_filename)
+        frames.append(Image.open(frame_filename))
+
         plt.close()
 
+# Create a GIF from the saved frames
+frames[0].save(gif_filename, save_all=True, append_images=frames[1:], duration=100, loop=0)
+
+# Clean up the individual frame files
+for frame in frames:
+    os.remove(frame.filename)
+
 print(f"PDF saved to: {pdf_filename}")
+print(f"GIF saved to: {gif_filename}")
