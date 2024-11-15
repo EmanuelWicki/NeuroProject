@@ -44,33 +44,6 @@ def compute_outward_normals(x, y):
     normals = np.array(normals)
     return normals
 
-# Find the intersection of a ray with a closed 2D curve in the normal direction
-def find_ray_intersection(point, direction, boundary_points):
-    min_distance = float('inf')
-    for i in range(len(boundary_points)):
-        # Get two consecutive points on the boundary to form a line segment
-        p1 = boundary_points[i]
-        p2 = boundary_points[(i + 1) % len(boundary_points)]
-
-        # Parameterize the line segment as p = p1 + t * (p2 - p1), with 0 <= t <= 1
-        segment = p2 - p1
-
-        # Solve for intersection using parametric equations
-        A = np.array([segment, -direction]).T
-        if np.linalg.det(A) == 0:
-            continue  # No unique solution, parallel lines
-
-        b = point - p1
-        t, u = np.linalg.solve(A, b)
-
-        # Check if intersection lies within the segment (0 <= t <= 1) and in the direction of the ray (u > 0)
-        if 0 <= t <= 1 and u > 0:
-            distance = u
-            if distance < min_distance:
-                min_distance = distance
-
-    return min_distance if min_distance != float('inf') else None
-
 # Apply Laplacian smoothing to reduce sharp concavities without losing features
 def adaptive_laplacian_smoothing(x, y, alpha=0.005):
     smoothed_x = x.copy()
@@ -98,86 +71,94 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 10
-max_expansion_factor = 0.005  # Max expansion step for longer distances
-min_expansion_factor = 0.001  # Minimum step for shorter distances
+num_iterations = 1000
+step_size = 0.001  # Step size for each iteration
 
 # Set the filename to save the PDF in the same directory as this script
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
+paths_pdf_filename = os.path.join(os.getcwd(), 'ventricle_to_white_matter_paths.pdf')
 
-# Save each step in a PDF
-with PdfPages(pdf_filename) as pdf:
-    for step in range(num_iterations):
-        print(f"Processing step {step + 1}")  # Debug statement
+# Initialize figure for plotting all steps
+plt.figure(figsize=(10, 10))
+ax = plt.gca()
 
-        # Compute outward normals for ventricle shape
-        normals = compute_outward_normals(ventricle_x, ventricle_y)
+# Plot the white matter boundary
+ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
 
-        # Convert ventricle points to array
-        ventricle_points = np.vstack((ventricle_x, ventricle_y)).T
+# Plot the initial ventricle shape as a filled region
+ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
 
-        # Expansion step for each ventricle point in the direction of the normal
-        new_ventricle_points = []
-        for i in range(len(ventricle_x)):
-            point = ventricle_points[i]
-            normal = normals[i]
+# Save each step's expansion vectors
+paths = [[] for _ in range(len(ventricle_x))]
+for step in range(num_iterations):
+    print(f"Processing step {step + 1}")  # Debug statement
 
-            # Find the intersection along the normal direction with the white matter boundary
-            intersection_distance = find_ray_intersection(point, normal, white_matter_points)
+    # Compute outward normals for ventricle shape
+    normals = compute_outward_normals(ventricle_x, ventricle_y)
 
-            # If an intersection is found, expand by a fraction of the shortest distance
-            if intersection_distance:
-                # Dynamic expansion based on the distance to white matter
-                expansion_distance = intersection_distance * 0.005
-                if expansion_distance < min_expansion_factor:
-                    expansion_distance = min_expansion_factor
-                new_point = point + expansion_distance * normal
-            else:
-                new_point = point + min_expansion_factor * normal
+    # Convert ventricle points to array
+    ventricle_points = np.vstack((ventricle_x, ventricle_y)).T
 
-            new_ventricle_points.append(new_point)
+    # Expansion step for each ventricle point in the direction of the normal
+    new_ventricle_points = []
+    for i in range(len(ventricle_x)):
+        point = ventricle_points[i]
+        normal = normals[i]
 
-        new_ventricle_points = np.array(new_ventricle_points)
+        # Move point along the normal direction by a fixed step size
+        new_point = point + step_size * normal
+        new_ventricle_points.append(new_point)
 
-        # Ensure the expanded surface is closed by averaging the start and end point normals for the merged expansion
-        new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
-        new_ventricle_points[-1] = new_ventricle_points[0]
+        # Store the path for each point
+        paths[i].append(new_point)
 
-        # Interpolate points to maintain a smooth curve
-        simplified_points = interpolate_points(new_ventricle_points)
+    new_ventricle_points = np.array(new_ventricle_points)
 
-        # Apply adaptive Laplacian smoothing to reduce sharp concavities
-        ventricle_x, ventricle_y = adaptive_laplacian_smoothing(simplified_points[:, 0], simplified_points[:, 1])
+    # Ensure the expanded surface is closed by averaging the start and end point normals for the merged expansion
+    new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
+    new_ventricle_points[-1] = new_ventricle_points[0]
 
-        # Plot and save every iteration with specified visualization
-        plt.figure(figsize=(8, 8))
-        ax = plt.gca()
+    # Interpolate points to maintain a smooth curve
+    simplified_points = interpolate_points(new_ventricle_points)
 
-        # Plot the white matter boundary
-        ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
+    # Apply adaptive Laplacian smoothing to reduce sharp concavities
+    ventricle_x, ventricle_y = adaptive_laplacian_smoothing(simplified_points[:, 0], simplified_points[:, 1])
 
-        # Plot the initial ventricle shape as a filled region
-        ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
+    # Plot the expansion vectors as a vector field for this step
+    ax.quiver(ventricle_points[:, 0], ventricle_points[:, 1], normals[:, 0], normals[:, 1],
+              angles='xy', scale_units='xy', scale=20, color='green', alpha=0.3)
 
-        # Plot the current ventricle boundary as a fine line
-        ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step + 1}')
-
-        # Plot the expansion vectors
-        for i in range(len(ventricle_x)):
-            if i == 0 or i == len(ventricle_x) - 1:
-                if i == 0:
-                    ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
-                             head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
-            else:
-                ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
-                         head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
-
-        ax.set_xlim(-2.5, 2.5)
-        ax.set_ylim(-2.5, 2.5)
-        ax.set_aspect('equal')
-        ax.set_title(f'Step {step + 1}')
-        plt.legend()
-        pdf.savefig()  # Save current figure to the PDF
-        plt.close()
+ax.set_xlim(-2.5, 2.5)
+ax.set_ylim(-2.5, 2.5)
+ax.set_aspect('equal')
+ax.set_title('Ventricle Expansion Over Time')
+plt.legend()
+plt.savefig(pdf_filename)
+plt.show()
 
 print(f"PDF saved to: {pdf_filename}")
+
+# Plot the paths from initial ventricle points to white matter boundary
+plt.figure(figsize=(10, 10))
+ax = plt.gca()
+
+# Plot the white matter boundary
+ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
+
+# Plot the initial ventricle shape as a filled region
+ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
+
+# Plot paths from initial ventricle points to white matter
+for path in paths:
+    path = np.array(path)
+    ax.plot(path[:, 0], path[:, 1], color='red', alpha=0.4)
+
+ax.set_xlim(-2.5, 2.5)
+ax.set_ylim(-2.5, 2.5)
+ax.set_aspect('equal')
+ax.set_title('Paths from Ventricle to White Matter')
+plt.legend()
+plt.savefig(paths_pdf_filename)
+plt.show()
+
+print(f"Paths PDF saved to: {paths_pdf_filename}")
