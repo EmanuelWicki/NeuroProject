@@ -1,12 +1,23 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_pdf import PdfPages
 from scipy.interpolate import splprep, splev
+import os
 
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 300)  # Increase number of points for smoother surface
-    r = 0.2 + 0.08 * np.sin(3 * t) + 0.05 * np.cos(5 * t)  # Smaller ventricle shape
+    r = 0.4 + 0.15 * np.sin(3 * t) + 0.1 * np.cos(5 * t)  # Randomized variations for larger initial shape
     x = r * np.cos(t) - 0.1  # Centered at (-0.1, 0)
+    y = r * np.sin(t)
+    return x, y
+
+# Function to create the white matter boundary
+def generate_white_matter_boundary():
+    t = np.linspace(0, 2 * np.pi, 600)  # Increase the number of points for smoother and more detailed boundary
+    r = (1.3 + 0.2 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
+         0.05 * np.cos(17 * t + 0.5))  # Add multiple sine and cosine components for complexity
+    x = r * np.cos(t)
     y = r * np.sin(t)
     return x, y
 
@@ -33,95 +44,140 @@ def compute_outward_normals(x, y):
     normals = np.array(normals)
     return normals
 
-# Function to check if two line segments intersect
-def check_intersection(p1, p2, q1, q2):
-    def ccw(a, b, c):
-        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
-    return ccw(p1, q1, q2) != ccw(p2, q1, q2) and ccw(p1, p2, q1) != ccw(p1, p2, q2)
+# Find the intersection of a ray with a closed 2D curve in the normal direction
+def find_ray_intersection(point, direction, boundary_points):
+    min_distance = float('inf')
+    for i in range(len(boundary_points)):
+        # Get two consecutive points on the boundary to form a line segment
+        p1 = boundary_points[i]
+        p2 = boundary_points[(i + 1) % len(boundary_points)]
 
-# Function to generate the adjusted expanded surface by wrapping a line around the normal vectors
-# and removing points that are enclosed due to concave intersections
-def generate_adjusted_expanded_surface(x, y, normals, expansion_length=0.05):
-    expanded_points = []
-    global skip_indices
-    skip_indices = set()
+        # Parameterize the line segment as p = p1 + t * (p2 - p1), with 0 <= t <= 1
+        segment = p2 - p1
 
-    # Generate all expanded points
+        # Solve for intersection using parametric equations
+        A = np.array([segment, -direction]).T
+        if np.linalg.det(A) == 0:
+            continue  # No unique solution, parallel lines
+
+        b = point - p1
+        t, u = np.linalg.solve(A, b)
+
+        # Check if intersection lies within the segment (0 <= t <= 1) and in the direction of the ray (u > 0)
+        if 0 <= t <= 1 and u > 0:
+            distance = u
+            if distance < min_distance:
+                min_distance = distance
+
+    return min_distance if min_distance != float('inf') else None
+
+# Apply Laplacian smoothing to reduce sharp concavities without losing features
+def adaptive_laplacian_smoothing(x, y, alpha=0.005):
+    smoothed_x = x.copy()
+    smoothed_y = y.copy()
     for i in range(len(x)):
-        if i in skip_indices:
-            continue
-        point = np.array([x[i], y[i]])
-        normal = normals[i]
-        expanded_point = point + expansion_length * normal
-        expanded_points.append(expanded_point)
+        prev_idx = (i - 1) % len(x)
+        next_idx = (i + 1) % len(x)
+        smoothed_x[i] = (1 - alpha) * x[i] + alpha * 0.5 * (x[prev_idx] + x[next_idx])
+        smoothed_y[i] = (1 - alpha) * y[i] + alpha * 0.5 * (y[prev_idx] + y[next_idx])
+    return smoothed_x, smoothed_y
 
-        # Check for intersections with previous normals
-        for j in range(i):
-            if j in skip_indices:
-                continue
-            prev_point = np.array([x[j], y[j]])
-            prev_expanded_point = prev_point + expansion_length * normals[j]
-            if check_intersection(point, expanded_point, prev_point, prev_expanded_point):
-                # If intersection is found, mark the indices in between as skipped
-                start_idx = min(i, j)
-                end_idx = max(i, j)
-                skip_indices.update(range(start_idx + 1, end_idx))
-                break
+# Function to interpolate points using a spline
+def interpolate_points(points, num_points=100):
+    tck, u = splprep([points[:, 0], points[:, 1]], s=0)
+    u_new = np.linspace(0, 1, num_points)
+    x_new, y_new = splev(u_new, tck)
+    return np.vstack((x_new, y_new)).T
 
-    expanded_points = np.array(expanded_points)
-    return expanded_points[:, 0], expanded_points[:, 1]
-
-# Function to fit a spline curve that connects the tips of the valid blue vectors without intersections
-def fit_spline_curve(expanded_x, expanded_y, skip_indices):
-    # Only consider points that were not skipped
-    valid_points = [(expanded_x[i], expanded_y[i]) for i in range(len(expanded_x)) if i not in skip_indices]
-    valid_points = np.array(valid_points)
-    
-    # Use spline fitting to smooth the curve
-    tck, u = splprep([valid_points[:, 0], valid_points[:, 1]], s=0.0005, per=True)
-    smooth_x, smooth_y = splev(np.linspace(0, 1, 4000), tck)
-    
-    return smooth_x, smooth_y
-
-# Plotting function to visualize the adjusted expanded surface
-def plot_expanded_surface(initial_x, initial_y, expanded_x, expanded_y, normals, expansion_length, skip_indices):
-    plt.figure(figsize=(8, 8))
-    ax = plt.gca()
-    
-    # Plot initial surface
-    ax.fill(initial_x, initial_y, color='gray', alpha=0.4, label='Ventricle Surface')
-    
-    # Plot expanded surface
-    ax.plot(expanded_x, expanded_y, color='red', linewidth=2, linestyle='-', label='Adjusted Expanded Surface')
-    
-    # Plot normal vectors
-    for i in range(len(initial_x)):
-        point = np.array([initial_x[i], initial_y[i]])
-        normal = normals[i]
-        expanded_point = point + expansion_length * normal
-        if i not in skip_indices:
-            ax.plot([point[0], expanded_point[0]], [point[1], expanded_point[1]], color='blue', linestyle='--', linewidth=0.5)
-    
-    # Fit and plot the spline curve to the tips of the blue vectors
-    fitted_x, fitted_y = fit_spline_curve(expanded_x, expanded_y, skip_indices)
-    ax.plot(fitted_x, fitted_y, color='green', linewidth=2, linestyle='-', label='Fitted Spline Curve')
-    
-    ax.set_xlim(-1.0, 1.0)
-    ax.set_ylim(-1.0, 1.0)
-    ax.set_aspect('equal')
-    ax.set_title('Adjusted Expanded Surface Without Internal Intersections')
-    plt.legend()
-    plt.show()
-
-# Main execution
+# Initialize the ventricle and white matter boundary
 ventricle_x, ventricle_y = generate_ventricle_shape()
+initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()  # Store initial structure for plotting
+white_matter_x, white_matter_y = generate_white_matter_boundary()
 
-# Compute normals for the ventricle shape
-normals = compute_outward_normals(ventricle_x, ventricle_y)
+# Convert white matter boundary to array for distance calculations
+white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
-# Generate the adjusted expanded surface without internal intersections
-expansion_length = 0.05
-expanded_x, expanded_y = generate_adjusted_expanded_surface(ventricle_x, ventricle_y, normals, expansion_length)
+# Number of expansion iterations
+num_iterations = 10
+max_expansion_factor = 0.005  # Max expansion step for longer distances
+min_expansion_factor = 0.001  # Minimum step for shorter distances
 
-# Plot the adjusted expanded surface
-plot_expanded_surface(ventricle_x, ventricle_y, expanded_x, expanded_y, normals, expansion_length, skip_indices)
+# Set the filename to save the PDF in the same directory as this script
+pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
+
+# Save each step in a PDF
+with PdfPages(pdf_filename) as pdf:
+    for step in range(num_iterations):
+        print(f"Processing step {step + 1}")  # Debug statement
+
+        # Compute outward normals for ventricle shape
+        normals = compute_outward_normals(ventricle_x, ventricle_y)
+
+        # Convert ventricle points to array
+        ventricle_points = np.vstack((ventricle_x, ventricle_y)).T
+
+        # Expansion step for each ventricle point in the direction of the normal
+        new_ventricle_points = []
+        for i in range(len(ventricle_x)):
+            point = ventricle_points[i]
+            normal = normals[i]
+
+            # Find the intersection along the normal direction with the white matter boundary
+            intersection_distance = find_ray_intersection(point, normal, white_matter_points)
+
+            # If an intersection is found, expand by a fraction of the shortest distance
+            if intersection_distance:
+                # Dynamic expansion based on the distance to white matter
+                expansion_distance = intersection_distance * 0.005
+                if expansion_distance < min_expansion_factor:
+                    expansion_distance = min_expansion_factor
+                new_point = point + expansion_distance * normal
+            else:
+                new_point = point + min_expansion_factor * normal
+
+            new_ventricle_points.append(new_point)
+
+        new_ventricle_points = np.array(new_ventricle_points)
+
+        # Ensure the expanded surface is closed by averaging the start and end point normals for the merged expansion
+        new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
+        new_ventricle_points[-1] = new_ventricle_points[0]
+
+        # Interpolate points to maintain a smooth curve
+        simplified_points = interpolate_points(new_ventricle_points)
+
+        # Apply adaptive Laplacian smoothing to reduce sharp concavities
+        ventricle_x, ventricle_y = adaptive_laplacian_smoothing(simplified_points[:, 0], simplified_points[:, 1])
+
+        # Plot and save every iteration with specified visualization
+        plt.figure(figsize=(8, 8))
+        ax = plt.gca()
+
+        # Plot the white matter boundary
+        ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
+
+        # Plot the initial ventricle shape as a filled region
+        ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
+
+        # Plot the current ventricle boundary as a fine line
+        ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step + 1}')
+
+        # Plot the expansion vectors
+        for i in range(len(ventricle_x)):
+            if i == 0 or i == len(ventricle_x) - 1:
+                if i == 0:
+                    ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
+                             head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
+            else:
+                ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
+                         head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
+
+        ax.set_xlim(-2.5, 2.5)
+        ax.set_ylim(-2.5, 2.5)
+        ax.set_aspect('equal')
+        ax.set_title(f'Step {step + 1}')
+        plt.legend()
+        pdf.savefig()  # Save current figure to the PDF
+        plt.close()
+
+print(f"PDF saved to: {pdf_filename}")

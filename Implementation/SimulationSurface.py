@@ -16,7 +16,7 @@ def generate_ventricle_shape():
 # Function to create the white matter boundary
 def generate_white_matter_boundary():
     t = np.linspace(0, 2 * np.pi, 600)  # Increase the number of points for smoother and more detailed boundary
-    r = (1.3 + 0.2 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
+    r = (1.1 + 0.2 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
          0.05 * np.cos(17 * t + 0.5))  # Add multiple sine and cosine components for complexity
     x = r * np.cos(t)
     y = r * np.sin(t)
@@ -73,7 +73,7 @@ def find_ray_intersection(point, direction, boundary_points):
     return min_distance if min_distance != float('inf') else None
 
 # Apply Laplacian smoothing to reduce sharp concavities without losing features
-def adaptive_laplacian_smoothing(x, y, alpha=0.005):
+def adaptive_laplacian_smoothing(x, y, alpha=0.001):
     smoothed_x = x.copy()
     smoothed_y = y.copy()
     for i in range(len(x)):
@@ -84,10 +84,20 @@ def adaptive_laplacian_smoothing(x, y, alpha=0.005):
     return smoothed_x, smoothed_y
 
 # Function to interpolate points using a spline
-def interpolate_points(points, num_points=100):
+def interpolate_points(points, num_points=200):
     tck, u = splprep([points[:, 0], points[:, 1]], s=0)
     u_new = np.linspace(0, 1, num_points)
     x_new, y_new = splev(u_new, tck)
+    return np.vstack((x_new, y_new)).T
+
+# Re-sample points to maintain a constant density along the expanded surface
+def resample_points(points, num_points=100):
+    distances = np.sqrt(np.sum(np.diff(points, axis=0)**2, axis=1))
+    cumulative_distances = np.insert(np.cumsum(distances), 0, 0)
+    total_length = cumulative_distances[-1]
+    new_distances = np.linspace(0, total_length, num_points)
+    x_new = np.interp(new_distances, cumulative_distances, points[:, 0])
+    y_new = np.interp(new_distances, cumulative_distances, points[:, 1])
     return np.vstack((x_new, y_new)).T
 
 # Initialize the ventricle and white matter boundary
@@ -99,16 +109,21 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 2000
-max_expansion_factor = 0.0005  # Max expansion step for longer distances
-min_expansion_factor = 0.0001  # Minimum step for shorter distances
+num_iterations = 100
+max_expansion_factor = max([find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) for i, normal in enumerate(compute_outward_normals(ventricle_x, ventricle_y)) if find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) is not None]) / 500  # Max expansion step for longer distances
+min_expansion_factor = max([find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) for i, normal in enumerate(compute_outward_normals(ventricle_x, ventricle_y)) if find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) is not None]) / 1000  # Minimum step for shorter distances
 
 # Set the filename to save the PDF in the same directory as this script
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
 gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion.gif')
 frames = []  # List to store frames for GIF
 
+# Track anchored points
+anchored_points = [False] * len(ventricle_x)
+
+
 # Save each step in a PDF and create frames for the GIF
+saved_any_pdf = False  # Track if we saved any pages to the PDF
 with PdfPages(pdf_filename) as pdf:
     for step in range(num_iterations):
         print(f"Processing step {step + 1}")  # Debug statement
@@ -121,7 +136,12 @@ with PdfPages(pdf_filename) as pdf:
 
         # Expansion step for each ventricle point in the direction of the normal
         new_ventricle_points = []
-        for i in range(len(ventricle_x)):
+        for i in range(len(ventricle_points)):
+            if anchored_points[i]:
+                # If the point is anchored, it does not move
+                new_ventricle_points.append(ventricle_points[i])
+                continue
+
             point = ventricle_points[i]
             normal = normals[i]
 
@@ -131,14 +151,23 @@ with PdfPages(pdf_filename) as pdf:
             # If an intersection is found, expand by a fraction of the shortest distance
             if intersection_distance:
                 # Dynamic expansion based on the distance to white matter
-                expansion_distance = intersection_distance * 0.0005
+                expansion_distance = min(intersection_distance, max_expansion_factor * intersection_distance)
                 if expansion_distance < min_expansion_factor:
                     expansion_distance = min_expansion_factor
-                new_point = point + expansion_distance * normal
+                if expansion_distance >= intersection_distance - 1e-6:  # Tolerance to prevent crossing boundary
+                    point = point + intersection_distance * normal  # Place exactly at the boundary
+                    anchored_points[i] = True  # Anchor the point at the boundary
+                else:
+                    point = point + expansion_distance * normal
             else:
-                new_point = point + min_expansion_factor * normal
+                point = point + min_expansion_factor * normal
 
-            new_ventricle_points.append(new_point)
+            # Ensure point is not outside the white matter boundary
+            if intersection_distance and np.linalg.norm(point - ventricle_points[i]) >= intersection_distance:
+                point = ventricle_points[i] + intersection_distance * normal
+                anchored_points[i] = True
+
+            new_ventricle_points.append(point)
 
         new_ventricle_points = np.array(new_ventricle_points)
 
@@ -146,8 +175,15 @@ with PdfPages(pdf_filename) as pdf:
         new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
         new_ventricle_points[-1] = new_ventricle_points[0]
 
+        # Re-sample points to maintain constant density along the expanded surface
+        resampled_points = resample_points(new_ventricle_points, num_points=300)
+
+        # Update anchored points to match the number of resampled points
+        anchored_points = [False] * len(resampled_points)
+
+        
         # Interpolate points to maintain a smooth curve
-        simplified_points = interpolate_points(new_ventricle_points)
+        simplified_points = interpolate_points(resampled_points)
 
         # Apply adaptive Laplacian smoothing to reduce sharp concavities
         ventricle_x, ventricle_y = adaptive_laplacian_smoothing(simplified_points[:, 0], simplified_points[:, 1])
@@ -166,8 +202,8 @@ with PdfPages(pdf_filename) as pdf:
         ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step + 1}')
 
         # Plot the expansion vectors
-        for i in range(len(ventricle_x)):
-            if i == 0 or i == len(ventricle_x) - 1:
+        for i in range(len(ventricle_points)):
+            if i == 0 or i == len(ventricle_points) - 1:
                 if i == 0:
                     ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
                              head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
@@ -181,6 +217,7 @@ with PdfPages(pdf_filename) as pdf:
         ax.set_title(f'Step {step + 1}')
         plt.legend()
         pdf.savefig()  # Save current figure to the PDF
+        saved_any_pdf = True  # Indicate that at least one page has been saved
 
         # Save the current frame as an image for the GIF
         frame_filename = f'frame_{step + 1}.png'
@@ -189,8 +226,9 @@ with PdfPages(pdf_filename) as pdf:
 
         plt.close()
 
-# Create a GIF from the saved frames
-frames[0].save(gif_filename, save_all=True, append_images=frames[1:], duration=100, loop=0)
+# Only save the PDF if pages were saved
+if saved_any_pdf:
+    frames[0].save(gif_filename, save_all=True, append_images=frames[1:], duration=max(100 // len(frames), 10), loop=0)
 
 # Clean up the individual frame files
 for frame in frames:
