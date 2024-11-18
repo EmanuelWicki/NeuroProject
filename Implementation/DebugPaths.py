@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from scipy.interpolate import splprep, splev
-from scipy.spatial import Delaunay
 from PIL import Image
 import os
 
@@ -10,14 +9,14 @@ import os
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 300)  # Increase number of points for smoother surface
     r = 0.4 + 0.15 * np.sin(3 * t) + 0.1 * np.cos(5 * t)  # Randomized variations for larger initial shape
-    x = r * np.cos(t) - 0.1  # Centered at (-0.1, 0)
+    x = r * np.cos(t) + 0  # Centered at (0.2, 0)
     y = r * np.sin(t)
     return x, y
 
 # Function to create the white matter boundary
 def generate_white_matter_boundary():
     t = np.linspace(0, 2 * np.pi, 600)  # Increase the number of points for smoother and more detailed boundary
-    r = (1.1 + 0.1 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
+    r = (0.9 + 0.1 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
          0.05 * np.cos(17 * t + 0.5))  # Add multiple sine and cosine components for complexity
     x = r * np.cos(t)
     y = r * np.sin(t)
@@ -101,20 +100,6 @@ def resample_points(points, num_points=100):
     y_new = np.interp(new_distances, cumulative_distances, points[:, 1])
     return np.vstack((x_new, y_new)).T
 
-# Function to get the alpha shape (outer boundary) of a set of points
-def get_alpha_shape(points, alpha=0.1):
-    tri = Delaunay(points)
-    edges = set()
-    for simplex in tri.simplices:
-        for i in range(3):
-            edge = tuple(sorted([simplex[i], simplex[(i + 1) % 3]]))
-            if edge in edges:
-                edges.remove(edge)
-            else:
-                edges.add(edge)
-    boundary_points = np.array([points[list(edge)[0]] for edge in edges])
-    return boundary_points
-
 # Initialize the ventricle and white matter boundary
 ventricle_x, ventricle_y = generate_ventricle_shape()
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()  # Store initial structure for plotting
@@ -124,7 +109,7 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 10
+num_iterations = 200
 
 # Set the filename to save the PDF in the same directory as this script
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
@@ -162,25 +147,22 @@ with PdfPages(pdf_filename) as pdf:
 
             # If an intersection is found, expand by a fraction of the shortest distance
             if intersection_distance:
-                # Dynamic expansion based on the distance to white matter
-                expansion_distance = intersection_distance * (1 - np.exp(-step / num_iterations))  # Gradually decrease step size as we approach the boundary  # Scale to reach the boundary in 500 steps
-                if expansion_distance >= intersection_distance - 1e-6:  # Tolerance to prevent crossing boundary
-                    point = point + intersection_distance * normal  # Place exactly at the boundary
-                    anchored_points[i] = True  # Anchor the point at the boundary
+                # Dynamic expansion with damping factor to asymptotically approach the boundary
+                damping_factor = 1 - np.exp(-intersection_distance * 10)  # Exponential damping as we approach boundary
+                expansion_distance = (intersection_distance / 200) * damping_factor  # Scale to reach asymptotically
+                
+                if expansion_distance >= intersection_distance * 0.98:  # Tolerance to prevent crossing boundary
+                    point = point + (intersection_distance * 0.98) * normal  # Place close but not at the boundary
+                    anchored_points[i] = True  # Anchor the point near the boundary
                 else:
                     point = point + expansion_distance * normal
             else:
                 # Default expansion step if no intersection is found
                 point = point + 0.01 * normal
 
-            # Self-intersection prevention and ensuring point is not outside the white matter boundary
-            for j in range(len(new_ventricle_points) - 1):
-                if j != i and np.linalg.norm(new_ventricle_points[j] - point) < 0.02:
-                    expansion_distance *= 0.5  # Reduce step size if too close to other points
-                    point = ventricle_points[i] + expansion_distance * normal
-
+            # Ensure point is not outside the white matter boundary
             if intersection_distance and np.linalg.norm(point - ventricle_points[i]) >= intersection_distance:
-                point = ventricle_points[i] + intersection_distance * normal
+                point = ventricle_points[i] + (intersection_distance - 1e-5) * normal  # Place close but not at the boundary
                 anchored_points[i] = True
 
             new_ventricle_points.append(point)
@@ -190,29 +172,6 @@ with PdfPages(pdf_filename) as pdf:
         # Ensure the expanded surface is closed by averaging the start and end point normals for the merged expansion
         new_ventricle_points[0] = (new_ventricle_points[0] + new_ventricle_points[-1]) / 2
         new_ventricle_points[-1] = new_ventricle_points[0]
-
-        # Simplify the boundary by filtering out overlapping segments
-        def remove_overlapping_segments(points):
-            filtered_points = []
-            for i in range(len(points)):
-                prev_idx = (i - 1) % len(points)
-                next_idx = (i + 1) % len(points)
-                prev_point = points[prev_idx]
-                current_point = points[i]
-                next_point = points[next_idx]
-
-                # Check if the current point is part of an overlap by comparing angles
-                v1 = current_point - prev_point
-                v2 = next_point - current_point
-                angle = np.arctan2(np.cross(v1, v2), np.dot(v1, v2))
-
-                # Keep points that do not create sharp concave angles (i.e., avoid overlaps)
-                if abs(angle) < np.pi / 2:
-                    filtered_points.append(current_point)
-
-            return np.array(filtered_points)
-
-        new_ventricle_points = remove_overlapping_segments(new_ventricle_points)
 
         # Re-sample points to maintain constant density along the expanded surface
         resampled_points = resample_points(new_ventricle_points, num_points=300)
