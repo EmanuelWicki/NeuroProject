@@ -38,6 +38,14 @@ def compute_outward_normals(x, y):
         normals.append(normal)
     return np.array(normals)
 
+# Function to update the anchored points list
+def update_anchored_points(anchored_points, new_length):
+    if len(anchored_points) < new_length:
+        anchored_points.extend([False] * (new_length - len(anchored_points)))
+    elif len(anchored_points) > new_length:
+        anchored_points = anchored_points[:new_length]
+    return anchored_points
+
 # Find the intersection of a ray with a closed 2D curve in the normal direction
 def find_ray_intersection(point, direction, boundary_points):
     min_distance = float('inf')
@@ -84,9 +92,7 @@ def resample_points(points, density):
     x_new = np.interp(new_distances, cumulative_distances, points[:, 0])
     y_new = np.interp(new_distances, cumulative_distances, points[:, 1])
     resampled_points = np.vstack((x_new, y_new)).T
-
-    # Ensure the surface is closed
-    resampled_points[-1] = resampled_points[0]
+    resampled_points[-1] = resampled_points[0]  # Ensure closure
     return resampled_points
 
 # Initialize the ventricle and white matter boundary
@@ -94,7 +100,6 @@ ventricle_x, ventricle_y = generate_ventricle_shape()
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()
 white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
-num_iterations = 200
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
 gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion.gif')
 frames = []
@@ -104,19 +109,31 @@ anchored_points = [False] * len(ventricle_x)
 density = len(ventricle_x) / np.sum(np.sqrt(np.sum(np.diff(np.vstack((ventricle_x, ventricle_y)).T, axis=0)**2, axis=1)))
 
 with PdfPages(pdf_filename) as pdf:
-    for step in range(num_iterations):
-        print(f'Number of points at step {step + 1}: {len(ventricle_x)}')
+    step = 0
+    while True:
+        step += 1
+        print(f'Number of points at step {step}: {len(ventricle_x)}')
         normals = compute_outward_normals(ventricle_x, ventricle_y)
         ventricle_points = np.vstack((ventricle_x, ventricle_y)).T
         new_ventricle_points = []
 
         for i in range(len(ventricle_points)):
+            if anchored_points[i]:
+                new_ventricle_points.append(ventricle_points[i])
+                continue
+
             normal = normals[i]
             point = ventricle_points[i]
             intersection_distance = find_ray_intersection(point, normal, white_matter_points)
             if intersection_distance:
-                expansion_distance = intersection_distance / 130
-                point = point + min(expansion_distance, 0.01) * normal
+                # Check if the point is within 0.01 distance from the boundary
+                if intersection_distance <= 0.01:
+                    point = point + intersection_distance * normal
+                    anchored_points[i] = True
+                    print(f"Point {i} anchored at boundary position: {point}")
+                else:
+                    expansion_distance = intersection_distance / 130
+                    point = point + min(expansion_distance, 0.01) * normal
             else:
                 point = point + 0.005 * normal
 
@@ -124,26 +141,38 @@ with PdfPages(pdf_filename) as pdf:
 
         new_ventricle_points = np.array(new_ventricle_points)
 
-        # Resample points and ensure surface closure
+        # Resample points and update the anchored_points list
         resampled_points = resample_points(new_ventricle_points, density)
         ventricle_x, ventricle_y = resampled_points[:, 0], resampled_points[:, 1]
+        anchored_points = update_anchored_points(anchored_points, len(ventricle_x))
 
         # Smooth the resampled points
         ventricle_x, ventricle_y = adaptive_laplacian_smoothing(ventricle_x, ventricle_y)
+
+        # Check stopping criterion: stop if 95% of points are anchored
+        if sum(anchored_points) >= 0.95 * len(anchored_points):
+            print(f"Stopping at step {step} as 95% of points are anchored.")
+            break
 
         plt.figure(figsize=(8, 8))
         ax = plt.gca()
         ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
         ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
-        ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step + 1}')
+        ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step}')
+        for i in range(len(ventricle_points)):
+            if anchored_points[i]:
+                ax.plot(ventricle_points[i, 0], ventricle_points[i, 1], 'bo', markersize=3)
+            else:
+                ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
+                         head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
         ax.set_xlim(-1.5, 1.5)
         ax.set_ylim(-1.5, 1.5)
         ax.set_aspect('equal')
-        ax.set_title(f'Step {step + 1}')
+        ax.set_title(f'Step {step}')
         plt.legend()
         pdf.savefig()
         saved_any_pdf = True
-        frame_filename = f'frame_{step + 1}.png'
+        frame_filename = f'frame_{step}.png'
         plt.savefig(frame_filename)
         frames.append(Image.open(frame_filename))
         plt.close()
