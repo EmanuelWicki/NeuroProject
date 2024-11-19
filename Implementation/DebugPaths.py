@@ -21,7 +21,7 @@ def generate_white_matter_boundary():
     y = r * np.sin(t)
     return x, y
 
-# Function to compute outward normals of a closed 2D curve
+# Function to compute outward normals of a closed 2D curve with a direction consistency check
 def compute_outward_normals(x, y):
     normals = []
     centroid = np.array([np.mean(x), np.mean(y)])
@@ -35,6 +35,13 @@ def compute_outward_normals(x, y):
         direction_to_centroid = centroid - point
         if np.dot(normal, direction_to_centroid) > 0:
             normal = -normal
+
+        # Consistency check with previous normal
+        if i > 0:
+            prev_normal = normals[-1]
+            if np.dot(normal, prev_normal) < -0.9:  # If the angle is nearly 180 degrees
+                normal = -normal
+
         normals.append(normal)
     return np.array(normals)
 
@@ -90,12 +97,19 @@ ventricle_x, ventricle_y = generate_ventricle_shape()
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()
 white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
-pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_stopping_surface.pdf')
-gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion_stopping.gif')
+pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field_avg.pdf')
+gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field_avg.gif')
 frames = []
 
 # Define initial density
 density = len(ventricle_x) / np.sum(np.sqrt(np.sum(np.diff(np.vstack((ventricle_x, ventricle_y)).T, axis=0)**2, axis=1)))
+
+# Define the number of steps for the initial phase
+initial_phase_steps = 50
+
+# Define cell size for vector field grid
+cell_size = 0.03
+vector_field = {}
 
 with PdfPages(pdf_filename) as pdf:
     step = 0
@@ -113,12 +127,28 @@ with PdfPages(pdf_filename) as pdf:
             intersection_distance = find_ray_intersection(point, normal, white_matter_points)
             if intersection_distance:
                 if intersection_distance <= 0.08:
-                    # No expansion once within the 0.05 distance to the boundary
+                    # Maintain distance without moving closer to the boundary
                     point = point + 0 * normal
                     close_to_boundary_count += 1
                 else:
-                    expansion_distance = intersection_distance / 80
+                    # Dynamic expansion distance logic
+                    if step <= initial_phase_steps:
+                        expansion_distance = intersection_distance / 200  # Smaller expansion step in initial phase
+                    else:
+                        expansion_distance = intersection_distance / 50  # Larger expansion step in later phase
                     point = point + min(expansion_distance, 0.01) * normal
+
+                    # Compute cell key for vector field
+                    cell_x = np.floor(point[0] / cell_size) * cell_size
+                    cell_y = np.floor(point[1] / cell_size) * cell_size
+                    cell_key = (cell_x, cell_y)
+
+                    # Store or average the vector in the cell
+                    if cell_key not in vector_field:
+                        vector_field[cell_key] = [normal]  # Store as a list
+                    else:
+                        vector_field[cell_key].append(normal)
+
             else:
                 point = point + 0.005 * normal
 
@@ -135,12 +165,22 @@ with PdfPages(pdf_filename) as pdf:
         ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
         ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
         ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step}')
-        for i in range(len(ventricle_points)):
-            if intersection_distance and intersection_distance <= 0.05:
-                ax.plot(ventricle_points[i, 0], ventricle_points[i, 1], 'bo', markersize=3)
-            else:
-                ax.arrow(ventricle_points[i, 0], ventricle_points[i, 1], normals[i, 0] * 0.02, normals[i, 1] * 0.02,
-                         head_width=0.02, head_length=0.02, fc='green', ec='green', alpha=0.6)
+
+        # Plot vector field
+        for (cx, cy), vectors in vector_field.items():
+            avg_vector = np.mean(vectors, axis=0)  # Average the vectors in the cell
+            ax.arrow(cx, cy, avg_vector[0] * 0.02, avg_vector[1] * 0.02,  # Adjust scaling factor as needed
+                     head_width=0.01, head_length=0.01, fc='purple', ec='purple', alpha=0.8)
+
+        # Plot cell borders
+        xmin, xmax, ymin, ymax = -1.5, 1.5, -1.5, 1.5  # Set bounds based on your coordinate system
+        x_cells = np.arange(xmin, xmax, cell_size)
+        y_cells = np.arange(ymin, ymax, cell_size)
+        for xc in x_cells:
+            ax.plot([xc, xc], [ymin, ymax], color='gray', linewidth=0.5, linestyle='--', alpha=0.5)
+        for yc in y_cells:
+            ax.plot([xmin, xmax], [yc, yc], color='gray', linewidth=0.5, linestyle='--', alpha=0.5)
+
         ax.set_xlim(-1.5, 1.5)
         ax.set_ylim(-1.5, 1.5)
         ax.set_aspect('equal')
