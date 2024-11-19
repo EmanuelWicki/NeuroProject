@@ -13,7 +13,7 @@ def generate_ventricle_shape():
     y = r * np.sin(t)
     return x, y
 
-# Function to create the white matter boundary
+# Function to create the original white matter boundary
 def generate_white_matter_boundary():
     t = np.linspace(0, 2 * np.pi, 600)
     r = (0.9 + 0.1 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) + 0.05 * np.cos(17 * t + 0.5))
@@ -35,15 +35,15 @@ def compute_outward_normals(x, y):
         direction_to_centroid = centroid - point
         if np.dot(normal, direction_to_centroid) > 0:
             normal = -normal
-
-        # Consistency check with previous normal
-        if i > 0:
-            prev_normal = normals[-1]
-            if np.dot(normal, prev_normal) < -0.9:  # If the angle is nearly 180 degrees
-                normal = -normal
-
         normals.append(normal)
     return np.array(normals)
+
+# Create the offset white matter boundary
+def create_offset_boundary(x, y, offset_distance=0.02):
+    normals = compute_outward_normals(x, y)
+    offset_x = x + offset_distance * normals[:, 0]
+    offset_y = y + offset_distance * normals[:, 1]
+    return offset_x, offset_y
 
 # Find the intersection of a ray with a closed 2D curve in the normal direction
 def find_ray_intersection(point, direction, boundary_points):
@@ -63,16 +63,6 @@ def find_ray_intersection(point, direction, boundary_points):
                 min_distance = distance
     return min_distance if min_distance != float('inf') else None
 
-# Apply Laplacian smoothing
-def adaptive_laplacian_smoothing(x, y, alpha=0.001):
-    smoothed_x = x.copy()
-    smoothed_y = y.copy()
-    for i in range(len(x)):
-        prev_idx = (i - 1) % len(x)
-        next_idx = (i + 1) % len(x)
-        smoothed_x[i] = (1 - alpha) * x[i] + alpha * 0.5 * (x[prev_idx] + x[next_idx])
-        smoothed_y[i] = (1 - alpha) * y[i] + alpha * 0.5 * (y[prev_idx] + y[next_idx])
-    return smoothed_x, smoothed_y
 
 # Interpolate points using a spline
 def interpolate_points(points, num_points=200):
@@ -92,13 +82,15 @@ def resample_points(points, density):
     y_new = np.interp(new_distances, cumulative_distances, points[:, 1])
     return np.vstack((x_new, y_new)).T
 
-# Initialize the ventricle and white matter boundary
+# Initialize the ventricle and white matter boundaries
 ventricle_x, ventricle_y = generate_ventricle_shape()
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()
 white_matter_x, white_matter_y = generate_white_matter_boundary()
-white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
-pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field_avg.pdf')
-gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field_avg.gif')
+offset_white_matter_x, offset_white_matter_y = create_offset_boundary(white_matter_x, white_matter_y)  # Offset boundary
+
+white_matter_points = np.vstack((offset_white_matter_x, offset_white_matter_y)).T
+pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field.pdf')
+gif_filename = os.path.join(os.getcwd(), 'ventricle_expansion_vector_field.gif')
 frames = []
 
 # Define initial density
@@ -108,7 +100,7 @@ density = len(ventricle_x) / np.sum(np.sqrt(np.sum(np.diff(np.vstack((ventricle_
 initial_phase_steps = 50
 
 # Define cell size for vector field grid
-cell_size = 0.03
+cell_size = 0.05
 vector_field = {}
 
 with PdfPages(pdf_filename) as pdf:
@@ -126,7 +118,7 @@ with PdfPages(pdf_filename) as pdf:
             point = ventricle_points[i]
             intersection_distance = find_ray_intersection(point, normal, white_matter_points)
             if intersection_distance:
-                if intersection_distance <= 0.08:
+                if intersection_distance <= 0.07:
                     # Maintain distance without moving closer to the boundary
                     point = point + 0 * normal
                     close_to_boundary_count += 1
@@ -139,15 +131,17 @@ with PdfPages(pdf_filename) as pdf:
                     point = point + min(expansion_distance, 0.01) * normal
 
                     # Compute cell key for vector field
-                    cell_x = np.floor(point[0] / cell_size) * cell_size
-                    cell_y = np.floor(point[1] / cell_size) * cell_size
+                    cell_x = np.floor(point[0] / cell_size) * cell_size + cell_size / 2
+                    cell_y = np.floor(point[1] / cell_size) * cell_size + cell_size / 2
                     cell_key = (cell_x, cell_y)
 
-                    # Store or average the vector in the cell
+                    # Store the vector in the cell or average if already present
                     if cell_key not in vector_field:
-                        vector_field[cell_key] = [normal]  # Store as a list
+                        vector_field[cell_key] = (normal, 1)
                     else:
-                        vector_field[cell_key].append(normal)
+                        current_vector, count = vector_field[cell_key]
+                        averaged_vector = (current_vector * count + normal) / (count + 1)
+                        vector_field[cell_key] = (averaged_vector, count + 1)
 
             else:
                 point = point + 0.005 * normal
@@ -162,14 +156,14 @@ with PdfPages(pdf_filename) as pdf:
 
         plt.figure(figsize=(8, 8))
         ax = plt.gca()
-        ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='White Matter Boundary')
+        ax.plot(white_matter_x, white_matter_y, color='blue', linewidth=2, label='Original White Matter Boundary')
+        ax.plot(offset_white_matter_x, offset_white_matter_y, color='green', linestyle='--', linewidth=1.5, label='Offset White Matter Boundary')
         ax.fill(initial_ventricle_x, initial_ventricle_y, color='gray', alpha=0.4, label='Initial Ventricle')
         ax.plot(ventricle_x, ventricle_y, color='red', linewidth=1, linestyle='-', label=f'Boundary at Step {step}')
 
         # Plot vector field
-        for (cx, cy), vectors in vector_field.items():
-            avg_vector = np.mean(vectors, axis=0)  # Average the vectors in the cell
-            ax.arrow(cx, cy, avg_vector[0] * 0.02, avg_vector[1] * 0.02,  # Adjust scaling factor as needed
+        for (cx, cy), (vector, count) in vector_field.items():
+            ax.arrow(cx, cy, vector[0] * 0.02, vector[1] * 0.02,  # Adjust scaling factor as needed
                      head_width=0.01, head_length=0.01, fc='purple', ec='purple', alpha=0.8)
 
         # Plot cell borders
