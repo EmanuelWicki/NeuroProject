@@ -4,6 +4,8 @@ import matplotlib.pyplot as plt
 from scipy.spatial import KDTree
 from scipy.interpolate import splprep, splev
 
+json_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/Implementation/example.json"
+
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 200)
@@ -30,7 +32,7 @@ def generate_evenly_distributed_points(x, y, num_points):
     return np.vstack((x_new, y_new)).T
 
 # Function to follow the vector field
-def follow_vector_field(start_point, vector_tree, vector_directions, white_matter_boundary, max_steps=500, step_size=0.01, tolerance=0.08):
+def follow_vector_field(start_point, vector_tree, vector_directions, white_matter_boundary, max_steps=500, step_size=0.01, tolerance=0.02):
     current_point = np.array(start_point)
     path = [current_point]
     for _ in range(max_steps):
@@ -52,12 +54,12 @@ def follow_vector_field(start_point, vector_tree, vector_directions, white_matte
     return np.array(path)
 
 # Load vector field from JSON
-with open('example.json', 'r') as f:
+with open(json_file_path, 'r') as f:
     vector_data = json.load(f)
 
 # Convert vector data into numpy arrays
-vector_positions = np.array([entry['start'] for entry in vector_data])
-vector_directions = np.array([entry['vector'] for entry in vector_data])
+vector_positions = np.array([[entry['start_x'], entry['start_y']] for entry in vector_data])
+vector_directions = np.array([[entry['vector_x'], entry['vector_y']] for entry in vector_data])
 
 # Create a KDTree for efficient nearest-neighbor search
 vector_tree = KDTree(vector_positions)
@@ -70,7 +72,7 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_boundary = np.vstack((white_matter_x, white_matter_y)).T
 
 # Generate evenly distributed points on the initial ventricle
-num_points = 120
+num_points = 400
 ventricle_points = generate_evenly_distributed_points(ventricle_x, ventricle_y, num_points)
 
 # Generate paths for each initial point
