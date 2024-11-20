@@ -5,6 +5,7 @@ from scipy.interpolate import splprep, splev
 from PIL import Image
 import os
 import json
+import math
 
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
 def generate_ventricle_shape():
@@ -47,40 +48,30 @@ def compute_outward_normals(x, y):
     return np.array(normals)
 
 # Find the intersection of a ray with a closed 2D curve in the normal direction
-def find_ray_intersection(point, direction, boundary_points):
+def find_ray_intersection(point, direction, boundary_points, angle_offsets=None):
     min_distance = float('inf')
-    for i in range(len(boundary_points)):
-        p1 = boundary_points[i]
-        p2 = boundary_points[(i + 1) % len(boundary_points)]
-        segment = p2 - p1
-        A = np.array([segment, -direction]).T
-        if np.linalg.det(A) == 0:
-            continue
-        b = point - p1
-        t, u = np.linalg.solve(A, b)
-        if 0 <= t <= 1 and u > 0:
-            distance = u
-            if distance < min_distance:
-                min_distance = distance
+    if angle_offsets is None:
+        angle_offsets = [0]  # Default: no rotation (single direction)
+    for angle in angle_offsets:
+        # Rotate the normal direction by the current angle
+        rotation_matrix = np.array([[np.cos(angle), -np.sin(angle)], 
+                                     [np.sin(angle), np.cos(angle)]])
+        rotated_direction = np.dot(rotation_matrix, direction)
+
+        for i in range(len(boundary_points)):
+            p1 = boundary_points[i]
+            p2 = boundary_points[(i + 1) % len(boundary_points)]
+            segment = p2 - p1
+            A = np.array([segment, -rotated_direction]).T
+            if np.linalg.det(A) == 0:
+                continue
+            b = point - p1
+            t, u = np.linalg.solve(A, b)
+            if 0 <= t <= 1 and u > 0:
+                distance = u
+                if distance < min_distance:
+                    min_distance = distance
     return min_distance if min_distance != float('inf') else None
-
-# Apply Laplacian smoothing
-def adaptive_laplacian_smoothing(x, y, alpha=0.001):
-    smoothed_x = x.copy()
-    smoothed_y = y.copy()
-    for i in range(len(x)):
-        prev_idx = (i - 1) % len(x)
-        next_idx = (i + 1) % len(x)
-        smoothed_x[i] = (1 - alpha) * x[i] + alpha * 0.5 * (x[prev_idx] + x[next_idx])
-        smoothed_y[i] = (1 - alpha) * y[i] + alpha * 0.5 * (y[prev_idx] + y[next_idx])
-    return smoothed_x, smoothed_y
-
-# Interpolate points using a spline
-def interpolate_points(points, num_points=200):
-    tck, u = splprep([points[:, 0], points[:, 1]], s=0)
-    u_new = np.linspace(0, 1, num_points)
-    x_new, y_new = splev(u_new, tck)
-    return np.vstack((x_new, y_new)).T
 
 # Re-sample points to maintain a constant density along the expanded surface
 def resample_points(points, density):
@@ -111,6 +102,14 @@ vector_data = []
 # Define the number of steps for the initial phase
 initial_phase_steps = 40
 
+# Define initial intersection limit and the minimum limit
+intersection_limit = 0.085
+min_intersection_limit = 0.01
+first_zone_reached = False  # Flag to track if the first zone is reached
+
+# Tracking whether 90% criterion is met
+reached_zone = False
+
 with PdfPages(pdf_filename) as pdf:
     step = 0
     while True:
@@ -121,24 +120,31 @@ with PdfPages(pdf_filename) as pdf:
         new_ventricle_points = []
 
         close_to_boundary_count = 0
+        reached_stop_criterion = False
+
         for i in range(len(ventricle_points)):
             normal = normals[i]
             point = ventricle_points[i]
-            intersection_distance = find_ray_intersection(point, normal, white_matter_points)
+
+            # Apply normal direction ±2°, ±4°, ±6°, ±8° if first zone is reached
+            if first_zone_reached:
+                angle_offsets = np.radians([-8, -6, -4, -2, 0, 2, 4, 6, 8])
+            else:
+                angle_offsets = None  # Single direction
+
+            intersection_distance = find_ray_intersection(point, normal, white_matter_points, angle_offsets)
+
             if intersection_distance:
-                if intersection_distance <= 0.06:
-                    # Maintain distance without moving closer to the boundary
+                if intersection_distance <= intersection_limit:
                     point = point + 0 * normal
                     close_to_boundary_count += 1
                 else:
-                    # Dynamic expansion distance logic
                     if step <= initial_phase_steps:
-                        expansion_distance = intersection_distance / 200  # Smaller expansion step in initial phase
+                        expansion_distance = intersection_distance / 200
                     else:
-                        expansion_distance = intersection_distance / 80  # Larger expansion step in later phase
+                        expansion_distance = intersection_distance / 80
                     point = point + min(expansion_distance, 0.01) * normal
 
-                    # Store vector data
                     vector_data.append({
                         "start_x": ventricle_points[i, 0],
                         "start_y": ventricle_points[i, 1],
@@ -147,17 +153,26 @@ with PdfPages(pdf_filename) as pdf:
                         "vector_x": normal[0],
                         "vector_y": normal[1]
                     })
-
             else:
                 point = point + 0.005 * normal
+
+            if intersection_distance and intersection_distance <= min_intersection_limit:
+                reached_stop_criterion = True
 
             new_ventricle_points.append(point)
 
         new_ventricle_points = np.array(new_ventricle_points)
-
-        # Resample points
         resampled_points = resample_points(new_ventricle_points, density)
         ventricle_x, ventricle_y = resampled_points[:, 0], resampled_points[:, 1]
+
+        if not reached_zone and close_to_boundary_count >= 0.9 * len(ventricle_points):
+            print(f"90% of points inside {intersection_limit:.2f} region at step {step}. Adjusting intersection limit.")
+            intersection_limit = max(intersection_limit - 0.01, min_intersection_limit)
+            first_zone_reached = True
+            reached_zone = True
+
+        if reached_zone and close_to_boundary_count < 0.9 * len(ventricle_points):
+            reached_zone = False
 
         plt.figure(figsize=(8, 8))
         ax = plt.gca()
@@ -178,8 +193,8 @@ with PdfPages(pdf_filename) as pdf:
         frames.append(Image.open(frame_filename))
         plt.close()
 
-        # Stopping condition
-        if close_to_boundary_count >= 0.9 * len(ventricle_points):
+        if reached_stop_criterion:
+            print(f"Stopping criterion reached: a single intersection distance <= {min_intersection_limit:.2f}.")
             break
 
 # Save vector data to JSON
