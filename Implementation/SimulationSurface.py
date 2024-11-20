@@ -9,14 +9,14 @@ import os
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 300)  # Increase number of points for smoother surface
     r = 0.4 + 0.15 * np.sin(3 * t) + 0.1 * np.cos(5 * t)  # Randomized variations for larger initial shape
-    x = r * np.cos(t) - 0.1  # Centered at (-0.1, 0)
+    x = r * np.cos(t) + 0.08  # Centered at (0.2, 0)
     y = r * np.sin(t)
     return x, y
 
 # Function to create the white matter boundary
 def generate_white_matter_boundary():
     t = np.linspace(0, 2 * np.pi, 600)  # Increase the number of points for smoother and more detailed boundary
-    r = (1.1 + 0.2 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
+    r = (0.9 + 0.1 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) +
          0.05 * np.cos(17 * t + 0.5))  # Add multiple sine and cosine components for complexity
     x = r * np.cos(t)
     y = r * np.sin(t)
@@ -109,9 +109,7 @@ white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
 
 # Number of expansion iterations
-num_iterations = 100
-max_expansion_factor = max([find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) for i, normal in enumerate(compute_outward_normals(ventricle_x, ventricle_y)) if find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) is not None]) / 500  # Max expansion step for longer distances
-min_expansion_factor = max([find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) for i, normal in enumerate(compute_outward_normals(ventricle_x, ventricle_y)) if find_ray_intersection(np.array([ventricle_x[i], ventricle_y[i]]), normal, white_matter_points) is not None]) / 1000  # Minimum step for shorter distances
+num_iterations = 200
 
 # Set the filename to save the PDF in the same directory as this script
 pdf_filename = os.path.join(os.getcwd(), 'ventricle_expansion_simplified_surface.pdf')
@@ -120,7 +118,6 @@ frames = []  # List to store frames for GIF
 
 # Track anchored points
 anchored_points = [False] * len(ventricle_x)
-
 
 # Save each step in a PDF and create frames for the GIF
 saved_any_pdf = False  # Track if we saved any pages to the PDF
@@ -151,16 +148,15 @@ with PdfPages(pdf_filename) as pdf:
             # If an intersection is found, expand by a fraction of the shortest distance
             if intersection_distance:
                 # Dynamic expansion based on the distance to white matter
-                expansion_distance = min(intersection_distance, max_expansion_factor * intersection_distance)
-                if expansion_distance < min_expansion_factor:
-                    expansion_distance = min_expansion_factor
-                if expansion_distance >= intersection_distance - 1e-6:  # Tolerance to prevent crossing boundary
+                expansion_distance = intersection_distance / 200  # Scale to reach the boundary in 500 steps
+                if expansion_distance >= intersection_distance - 1e-5:  # Tolerance to prevent crossing boundary
                     point = point + intersection_distance * normal  # Place exactly at the boundary
                     anchored_points[i] = True  # Anchor the point at the boundary
                 else:
                     point = point + expansion_distance * normal
             else:
-                point = point + min_expansion_factor * normal
+                # Default expansion step if no intersection is found
+                point = point + 0.01 * normal
 
             # Ensure point is not outside the white matter boundary
             if intersection_distance and np.linalg.norm(point - ventricle_points[i]) >= intersection_distance:
@@ -179,9 +175,14 @@ with PdfPages(pdf_filename) as pdf:
         resampled_points = resample_points(new_ventricle_points, num_points=300)
 
         # Update anchored points to match the number of resampled points
-        anchored_points = [False] * len(resampled_points)
+        new_anchored_points = []
+        for i in range(len(resampled_points)):
+            # Find the closest original point and inherit its anchored status
+            distances = np.linalg.norm(resampled_points[i] - ventricle_points, axis=1)
+            closest_idx = np.argmin(distances)
+            new_anchored_points.append(anchored_points[closest_idx])
+        anchored_points = new_anchored_points
 
-        
         # Interpolate points to maintain a smooth curve
         simplified_points = interpolate_points(resampled_points)
 
