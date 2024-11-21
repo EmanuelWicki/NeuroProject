@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # File paths
-json_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/Implementation/example.json"
+json_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/Implementation/vector_field2.json"
 
 # Function to create the ventricular surface
 def generate_ventricle_shape():
@@ -97,6 +97,17 @@ def detect_divergence_points_window(vector_grid, grid_size, window_size=7, diver
     
     return divergence_points
 
+# Function to save paths to a JSON file
+def save_paths_to_json(paths, output_file):
+    paths_data = {"paths": []}
+    for path in paths:
+        path_points = [{"x": float(point[0]), "y": float(point[1])} for point in path]
+        paths_data["paths"].append(path_points)
+    
+    with open(output_file, 'w') as f:
+        json.dump(paths_data, f, indent=4)
+    print(f"Paths saved to {output_file}")
+
 # Load raw vector data from JSON
 with open(json_file_path, 'r') as f:
     vector_data = json.load(f)
@@ -119,6 +130,10 @@ side_branches = []
 for point in all_divergence_points:
     side_branch = follow_averaged_vector_grid(point, averaged_vector_grid, grid_size)
     side_branches.append(side_branch)
+
+# Save the generated paths to a JSON file
+output_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/Implementation/paths.json"
+save_paths_to_json(side_branches, output_file_path)
 
 # Plot the results
 plt.figure(figsize=(8, 8))
