@@ -14,9 +14,17 @@ def compute_distances_from_ventricle(ventricle_points, side_branches):
         distances.append(branch_distances)
     return distances
 
+# Generate the white matter boundary
+def generate_white_matter_boundary():
+    t = np.linspace(0, 2 * np.pi, 800)
+    r = (0.9 + 0.1 * np.sin(7 * t) + 0.15 * np.cos(11 * t) + 0.1 * np.sin(13 * t + 1.5) + 0.05 * np.cos(17 * t + 0.5))
+    x = r * np.cos(t)
+    y = r * np.sin(t)
+    return x, y
+
 # Original animation: paths grow sequentially
 def create_growth_animation(
-    ventricle_x, ventricle_y, side_branches, gif_path, duration=10, fps=20
+    ventricle_x, ventricle_y, white_matter_x, white_matter_y, side_branches, gif_path, duration=10, fps=20
 ):
     total_frames = duration * fps
     branch_frames = np.linspace(0, len(side_branches), total_frames, dtype=int)
@@ -24,8 +32,9 @@ def create_growth_animation(
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_aspect('equal')
     ax.plot(ventricle_x, ventricle_y, label='Ventricular Surface', color='red')
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(-1, 1)
+    ax.plot(white_matter_x, white_matter_y, label='White Matter Surface', color='green')
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
     ax.axis('off')
 
     lines = []
@@ -47,7 +56,7 @@ def create_growth_animation(
 
 # Distance-based animation
 def create_distance_based_animation(
-    ventricle_x, ventricle_y, side_branches, distances, gif_path, duration=10, fps=20
+    ventricle_x, ventricle_y, white_matter_x, white_matter_y, side_branches, distances, gif_path, duration=10, fps=20
 ):
     total_frames = duration * fps
     max_distance = max(max(d) for d in distances)
@@ -56,8 +65,9 @@ def create_distance_based_animation(
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_aspect('equal')
     ax.plot(ventricle_x, ventricle_y, label='Ventricular Surface', color='red')
-    ax.set_xlim(-1, 1)
-    ax.set_ylim(-1, 1)
+    ax.plot(white_matter_x, white_matter_y, label='White Matter Surface', color='green')
+    ax.set_xlim(-1.5, 1.5)
+    ax.set_ylim(-1.5, 1.5)
     ax.axis('off')
 
     lines = []
@@ -113,14 +123,17 @@ side_branches = [np.array([[point["x"], point["y"]] for point in path]) for path
 ventricle_x, ventricle_y = generate_ventricle_shape()
 ventricle_points = np.column_stack((ventricle_x, ventricle_y))
 
+# Generate the white matter boundary
+white_matter_x, white_matter_y = generate_white_matter_boundary()
+
 # Compute distances of branch points from the ventricle
 distances = compute_distances_from_ventricle(ventricle_points, side_branches)
 
 # Create and save both animations
 print("Creating original growth animation...")
-create_growth_animation(ventricle_x, ventricle_y, side_branches, output_gif_path1, duration=10, fps=20)
+create_growth_animation(ventricle_x, ventricle_y, white_matter_x, white_matter_y, side_branches, output_gif_path1, duration=10, fps=20)
 
 print("Creating distance-based growth animation...")
 create_distance_based_animation(
-    ventricle_x, ventricle_y, side_branches, distances, output_gif_path2, duration=10, fps=20
+    ventricle_x, ventricle_y, white_matter_x, white_matter_y, side_branches, distances, output_gif_path2, duration=10, fps=20
 )

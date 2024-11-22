@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 # File paths
-json_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/Implementation/vector_field2.json"
+json_file_path = "C:/Users/Emanuel Wicki/Documents/Neuro Project/NeuroProject/vector_field5.json"
 
 # Function to create the ventricular surface
 def generate_ventricle_shape():
