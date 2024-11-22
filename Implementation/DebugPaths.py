@@ -116,7 +116,7 @@ intersection_limit = 0.095
 min_intersection_limit = 0.005
 first_zone_reached = False  # Flag to track if the first zone is reached
 
-# Tracking whether 90% criterion is met
+# Tracking whether the required criterion is met
 reached_zone = False
 
 with PdfPages(pdf_filename) as pdf:
@@ -130,6 +130,10 @@ with PdfPages(pdf_filename) as pdf:
 
         close_to_boundary_count = 0
         reached_stop_criterion = False
+
+        # Gradually increase the required percentage of points in the threshold zone
+        required_percentage = 0.8 + 0.2 * (1 - (intersection_limit - min_intersection_limit) / (0.095 - min_intersection_limit))
+        required_percentage = min(required_percentage, 1.0)  # Cap at 100%
 
         for i in range(len(ventricle_points)):
             normal = normals[i]
@@ -170,18 +174,18 @@ with PdfPages(pdf_filename) as pdf:
                 reached_stop_criterion = True
 
             new_ventricle_points.append(point)
-
+        print(f'Close to boundary count: {close_to_boundary_count}')
         new_ventricle_points = np.array(new_ventricle_points)
         resampled_points = resample_points(new_ventricle_points, density)
         ventricle_x, ventricle_y = resampled_points[:, 0], resampled_points[:, 1]
 
-        if not reached_zone and close_to_boundary_count >= 0.8 * len(ventricle_points):
-            print(f"80% of points inside {intersection_limit:.2f} region at step {step}. Adjusting intersection limit.")
+        if not reached_zone and close_to_boundary_count >= required_percentage * len(ventricle_points):
+            print(f"{int(required_percentage * 100)}% of points inside {intersection_limit:.2f} region at step {step}. Adjusting intersection limit.")
             intersection_limit = max(intersection_limit - 0.01, min_intersection_limit)
             first_zone_reached = True
             reached_zone = True
 
-        if reached_zone and close_to_boundary_count < 0.8 * len(ventricle_points):
+        if reached_zone and close_to_boundary_count < required_percentage * len(ventricle_points):
             reached_zone = False
 
         plt.figure(figsize=(8, 8))
