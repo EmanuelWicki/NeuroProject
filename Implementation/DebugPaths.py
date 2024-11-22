@@ -23,28 +23,36 @@ def generate_white_matter_boundary():
     y = r * np.sin(t)
     return x, y
 
-# Function to compute outward normals of a closed 2D curve with a direction consistency check
-def compute_outward_normals(x, y):
+# Function to compute the signed area of a closed curve (shoelace formula)
+def compute_signed_area(x, y):
+    x = np.append(x, x[0])  # Close the loop
+    y = np.append(y, y[0])
+    return 0.5 * np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
+
+# Ensure the curve is clockwise-oriented
+def ensure_clockwise_orientation(x, y):
+    signed_area = compute_signed_area(x, y)
+    if signed_area > 0:  # Counterclockwise
+        x = x[::-1]
+        y = y[::-1]
+    return x, y
+
+# Compute normals pointing to the left of the tangent vector for a clockwise curve
+def compute_outward_normals_cw(x, y):
     normals = []
-    centroid = np.array([np.mean(x), np.mean(y)])
     for i in range(len(x)):
         next_idx = (i + 1) % len(x)
         prev_idx = (i - 1) % len(x)
+
+        # Compute tangent vector
         tangent = np.array([x[next_idx] - x[prev_idx], y[next_idx] - y[prev_idx]])
         tangent /= np.linalg.norm(tangent)
-        normal = np.array([-tangent[1], tangent[0]])
-        point = np.array([x[i], y[i]])
-        direction_to_centroid = centroid - point
-        if np.dot(normal, direction_to_centroid) > 0:
-            normal = -normal
 
-        # Consistency check with previous normal
-        if i > 0:
-            prev_normal = normals[-1]
-            if np.dot(normal, prev_normal) < -0.9:  # If the angle is nearly 180 degrees
-                normal = -normal
+        # Compute normal vector (perpendicular to tangent, pointing left)
+        normal = np.array([-tangent[1], tangent[0]])
 
         normals.append(normal)
+
     return np.array(normals)
 
 # Find the intersection of a ray with a closed 2D curve in the normal direction
@@ -64,10 +72,10 @@ def find_ray_intersection(point, direction, boundary_points, angle_offsets=None)
             segment = p2 - p1
             A = np.array([segment, -rotated_direction]).T
             if np.linalg.det(A) == 0:
-                continue
+                continue  # Skip parallel cases
             b = point - p1
             t, u = np.linalg.solve(A, b)
-            if 0 <= t <= 1 and u > 0:
+            if 0 <= t <= 1 and u > 0:  # Intersection is within the segment and along the ray
                 distance = u
                 if distance < min_distance:
                     min_distance = distance
@@ -86,6 +94,7 @@ def resample_points(points, density):
 
 # Initialize the ventricle and white matter boundary
 ventricle_x, ventricle_y = generate_ventricle_shape()
+ventricle_x, ventricle_y = ensure_clockwise_orientation(ventricle_x, ventricle_y)
 initial_ventricle_x, initial_ventricle_y = ventricle_x.copy(), ventricle_y.copy()
 white_matter_x, white_matter_y = generate_white_matter_boundary()
 white_matter_points = np.vstack((white_matter_x, white_matter_y)).T
@@ -103,8 +112,8 @@ vector_data = []
 initial_phase_steps = 40
 
 # Define initial intersection limit and the minimum limit
-intersection_limit = 0.085
-min_intersection_limit = 0.01
+intersection_limit = 0.095
+min_intersection_limit = 0.005
 first_zone_reached = False  # Flag to track if the first zone is reached
 
 # Tracking whether 90% criterion is met
@@ -115,7 +124,7 @@ with PdfPages(pdf_filename) as pdf:
     while True:
         step += 1
         print(f'Number of points at step {step}: {len(ventricle_x)}')
-        normals = compute_outward_normals(ventricle_x, ventricle_y)
+        normals = compute_outward_normals_cw(ventricle_x, ventricle_y)
         ventricle_points = np.vstack((ventricle_x, ventricle_y)).T
         new_ventricle_points = []
 
@@ -126,24 +135,25 @@ with PdfPages(pdf_filename) as pdf:
             normal = normals[i]
             point = ventricle_points[i]
 
-            # Apply normal direction ±2°, ±4°, ±6°, ±8° if first zone is reached
-            if first_zone_reached:
-                angle_offsets = np.radians([-8, -6, -4, -2, 0, 2, 4, 6, 8])
-            else:
-                angle_offsets = None  # Single direction
-
-            intersection_distance = find_ray_intersection(point, normal, white_matter_points, angle_offsets)
+            intersection_distance = find_ray_intersection(point, normal, white_matter_points, angle_offsets=None)
 
             if intersection_distance:
                 if intersection_distance <= intersection_limit:
+                    if first_zone_reached:
+                        angle_offsets = np.radians([-6, -3, 0, 3, 6])
+                        intersection_distance = find_ray_intersection(point, normal, white_matter_points, angle_offsets)
+
                     point = point + 0 * normal
                     close_to_boundary_count += 1
                 else:
-                    if step <= initial_phase_steps:
-                        expansion_distance = intersection_distance / 200
+                    if first_zone_reached:
+                        expansion_distance = intersection_distance / 10
                     else:
-                        expansion_distance = intersection_distance / 80
-                    point = point + min(expansion_distance, 0.01) * normal
+                        expansion_distance = (
+                            intersection_distance / 200 if step <= initial_phase_steps
+                            else intersection_distance / 60
+                        )
+                    point = point + min(expansion_distance, 0.2) * normal
 
                     vector_data.append({
                         "start_x": ventricle_points[i, 0],
@@ -165,13 +175,13 @@ with PdfPages(pdf_filename) as pdf:
         resampled_points = resample_points(new_ventricle_points, density)
         ventricle_x, ventricle_y = resampled_points[:, 0], resampled_points[:, 1]
 
-        if not reached_zone and close_to_boundary_count >= 0.9 * len(ventricle_points):
-            print(f"90% of points inside {intersection_limit:.2f} region at step {step}. Adjusting intersection limit.")
+        if not reached_zone and close_to_boundary_count >= 0.8 * len(ventricle_points):
+            print(f"80% of points inside {intersection_limit:.2f} region at step {step}. Adjusting intersection limit.")
             intersection_limit = max(intersection_limit - 0.01, min_intersection_limit)
             first_zone_reached = True
             reached_zone = True
 
-        if reached_zone and close_to_boundary_count < 0.9 * len(ventricle_points):
+        if reached_zone and close_to_boundary_count < 0.8 * len(ventricle_points):
             reached_zone = False
 
         plt.figure(figsize=(8, 8))
