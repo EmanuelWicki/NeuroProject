@@ -104,7 +104,7 @@ frames = []
 
 # Define initial density
 density = len(ventricle_x) / np.sum(np.sqrt(np.sum(np.diff(np.vstack((ventricle_x, ventricle_y)).T, axis=0)**2, axis=1)))
-
+print(f'density: {density}')
 # Define vector field data
 vector_data = []
 
