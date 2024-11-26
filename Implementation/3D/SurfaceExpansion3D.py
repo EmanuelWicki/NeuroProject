@@ -6,7 +6,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 
 
 # Generate a bumpy sphere mesh
-def generate_bumpy_sphere(center, radius, resolution=100, bump_amplitude=0.03, bump_frequency=3, asymmetry=0.02):
+def generate_bumpy_sphere(center, radius, resolution=120, bump_amplitude=0.03, bump_frequency=3, asymmetry=0.02):
     u = np.linspace(0, 2 * np.pi, resolution)
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
@@ -27,7 +27,7 @@ def generate_bumpy_sphere(center, radius, resolution=100, bump_amplitude=0.03, b
 
 
 # Generate a flower-shaped white matter boundary
-def generate_flower_shape(center, radius, resolution=100, petal_amplitude=1, petal_frequency=5):
+def generate_flower_shape(center, radius, resolution=150, petal_amplitude=1, petal_frequency=5):
     u = np.linspace(0, 2 * np.pi, resolution)
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
@@ -46,20 +46,37 @@ def generate_flower_shape(center, radius, resolution=100, petal_amplitude=1, pet
     return trimesh.Trimesh(vertices=vertices, faces=faces)
 
 
-# Expansion process with curvature and voxelized vector field
-def expand_ventricle_with_vector_field(ventricle, white_matter, steps=20, fraction=0.2, voxel_size=0.1):
+def expand_ventricle_with_vector_field(ventricle, white_matter, fraction=0.2, voxel_size=0.1, stop_threshold=0.01):
+    """
+    Expand the ventricle surface until all points are within the stopping threshold of the white matter boundary.
+
+    Parameters:
+    - ventricle: Initial ventricle mesh.
+    - white_matter: White matter boundary mesh.
+    - fraction: Fraction of the intersection distance for expansion step size.
+    - voxel_size: Float, size of each voxel in the grid.
+    - stop_threshold: Float, distance threshold to stop expansion for individual vertices.
+
+    Returns:
+    - meshes: List of expanded meshes for each step.
+    - paths: Dictionary containing paths of all vertices.
+    - averaged_vectors: Dictionary of voxelized vectors representing the expansion field.
+    """
     ventricle_mesh = ventricle.copy()
     meshes = [ventricle_mesh]
     paths = {i: [vertex] for i, vertex in enumerate(ventricle.vertices)}
     vectors = {}
 
-    print(f'Expansion Started')
+    step = 0
+    print("Expansion Started")
 
-    for step in range(steps):
+    while True:
         new_points = []
         normals = (ventricle_mesh.vertices - ventricle_mesh.centroid)
         normals /= np.linalg.norm(normals, axis=1)[:, np.newaxis]
-        print(f'step: {step}/{steps}')
+
+        all_within_threshold = True  # Flag to check if all points meet the stopping condition
+        print(f"Step: {step}, Expanding...")
 
         for i, (point, normal) in enumerate(zip(ventricle_mesh.vertices, normals)):
             locations, _, _ = white_matter.ray.intersects_location(ray_origins=[point], ray_directions=[normal])
@@ -67,10 +84,14 @@ def expand_ventricle_with_vector_field(ventricle, white_matter, steps=20, fracti
             if len(locations) > 0:
                 closest_point = locations[0]
                 distance = np.linalg.norm(closest_point - point)
+
+                if distance > stop_threshold:
+                    all_within_threshold = False  # At least one point still needs to expand
+
                 step_distance = distance * fraction
                 direction = normal * step_distance
             else:
-                direction = normal * 0.01
+                direction = normal * 0.0  # No movement if no intersection
 
             new_point = point + direction
             paths[i].append(new_point)
@@ -85,13 +106,24 @@ def expand_ventricle_with_vector_field(ventricle, white_matter, steps=20, fracti
 
             new_points.append(new_point)
 
+        # Update the mesh with new vertices
         ventricle_mesh = trimesh.Trimesh(vertices=np.array(new_points), faces=ventricle_mesh.faces)
         meshes.append(ventricle_mesh)
-        print(f'Expansion points: {len(new_points)}')
 
+        print(f"Step {step} completed. Points updated: {len(new_points)}")
+
+        # Break the loop if all points are within the stopping threshold
+        if all_within_threshold:
+            print("All points are within the stopping threshold. Expansion complete.")
+            break
+
+        step += 1
+
+    # Average vectors in each voxel
     averaged_vectors = {voxel: np.mean(vectors[voxel], axis=0) for voxel in vectors}
 
     return meshes, paths, averaged_vectors
+
 
 
 # Create an animation of the expansion process with the white matter boundary
@@ -128,7 +160,7 @@ def animate_expansion_with_white_matter(meshes, white_matter, initial_surface_fr
             mesh.vertices[:, 2],
             triangles=mesh.faces,
             color="green",
-            alpha=0.6,
+            alpha=0.9,
             edgecolor="grey",
             linewidth=0.2,
         )
@@ -171,7 +203,7 @@ def plot_vector_field(vectors, voxel_size):
         ax.quiver(
             origin[0], origin[1], origin[2],  # Origin of the vector
             vector[0], vector[1], vector[2],  # Vector components
-            length=0.1,                      # Adjusted length for better representation
+            length=0.1,                       # Adjusted length for better representation
             color="green",
             alpha=0.8,                        # Higher alpha for better visibility
             linewidth=1.5,                    # Slightly thicker arrows
@@ -196,9 +228,9 @@ def plot_vertex_paths(paths):
         path = np.array(path)
         ax.plot(path[:, 0], path[:, 1], path[:, 2], alpha=0.7, linewidth=0.8, color="orange")
 
-    ax.set_xlim(-1.5, 1.5)
-    ax.set_ylim(-1.5, 1.5)
-    ax.set_zlim(-1.5, 1.5)
+    ax.set_xlim(-2.5, 2.5)
+    ax.set_ylim(-2.5, 2.5)
+    ax.set_zlim(-2.5, 2.5)
     ax.set_title("Vertex Paths During Expansion")
     plt.show()
 
@@ -208,9 +240,11 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.3)
     white_matter = generate_flower_shape(center=(0, 0, 0), radius=1.0)
 
+    # Perform expansion process with dynamic stopping condition
     meshes, paths, vectors = expand_ventricle_with_vector_field(
-        ventricle, white_matter, steps=50, fraction=0.02, voxel_size=0.1
+        ventricle, white_matter, fraction=0.02, voxel_size=0.05, stop_threshold=0.005
     )
+
 
     animate_expansion_with_white_matter(meshes, white_matter, initial_surface_frames=20, save_as_gif=True)
     # plot_vertex_paths(paths)
