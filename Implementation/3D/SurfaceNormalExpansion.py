@@ -2,11 +2,10 @@ import numpy as np
 import trimesh
 from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter
 
 
 # Generate a bumpy sphere mesh
-def generate_bumpy_sphere(center, radius, resolution=40, bump_amplitude=0.03, bump_frequency=3, asymmetry=0.02):
+def generate_bumpy_sphere(center, radius, resolution=20, bump_amplitude=0.03, bump_frequency=3, asymmetry=0.02):
     u = np.linspace(0, 2 * np.pi, resolution)
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
@@ -84,7 +83,7 @@ def calculate_corrected_vertex_normals(vertices, faces):
     return vertex_normals
 
 
-def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.9):
+def laplacian_smoothing(mesh, iterations=3, lambda_factor=0.5):
     """
     Perform Laplacian smoothing on a mesh.
 
@@ -106,7 +105,7 @@ def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.9):
 
     for _ in range(iterations):
         new_vertices = vertices.copy()
-        
+
         for vertex_index, neighbors in adjacency_dict.items():
             if neighbors:
                 neighbor_positions = vertices[neighbors]
@@ -114,15 +113,20 @@ def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.9):
                 new_vertices[vertex_index] = (
                     (1 - lambda_factor) * vertices[vertex_index] + lambda_factor * centroid
                 )
-        
+
         vertices = new_vertices
 
     return trimesh.Trimesh(vertices=vertices, faces=mesh.faces)
 
 
+# Resample the mesh to maintain consistent density
+def resample_mesh(mesh, target_edge_length):
+    vertices, faces = trimesh.remesh.subdivide_to_size(mesh.vertices, mesh.faces, max_edge=target_edge_length)
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
 
-# Expand ventricle with smoothing
-def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, voxel_size=0.1, max_iterations=10):
+
+# Expand ventricle with smoothing and resampling
+def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, target_edge_length=0.05, max_iterations=10):
     ventricle_mesh = ventricle.copy()
     meshes = [ventricle_mesh]
     paths = {i: [vertex] for i, vertex in enumerate(ventricle.vertices)}
@@ -151,7 +155,10 @@ def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, vo
                 direction = normal * 0.0
 
             new_point = point + direction
-            paths[i].append(new_point)
+            if i in paths:
+                paths[i].append(new_point)
+            else:
+                paths[i] = [new_point]
 
             step_vectors.append((point, direction))
             new_points.append(new_point)
@@ -160,12 +167,119 @@ def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, vo
         ventricle_mesh = trimesh.Trimesh(vertices=np.array(new_points), faces=ventricle_mesh.faces)
 
         # Apply Laplacian smoothing
-        ventricle_mesh = laplacian_smoothing(ventricle_mesh, iterations=3, lambda_factor=0.7)
+        ventricle_mesh = laplacian_smoothing(ventricle_mesh, iterations=3, lambda_factor=0.5)
+
+        # Resample the mesh to maintain density
+        resampled_mesh = resample_mesh(ventricle_mesh, target_edge_length)
+
+        # Update paths for resampled vertices
+        new_paths = {}
+        for i, vertex in enumerate(resampled_mesh.vertices):
+            if i < len(paths):
+                new_paths[i] = paths[i]
+            else:
+                new_paths[i] = [vertex]  # Initialize new vertex paths
+
+        paths = new_paths
+        ventricle_mesh = resampled_mesh
         meshes.append(ventricle_mesh)
 
-        print(f"Step {step + 1} completed. Points updated: {len(new_points)}")
+        print(f"Step {step + 1} completed. Points updated: {len(ventricle_mesh.vertices)}")
 
     return meshes, paths, vectors_per_step
+
+
+# Function to get total displacement vectors
+def get_total_displacement_vectors(paths):
+    """
+    Get the total displacement vectors for each vertex.
+
+    Parameters:
+    - paths: Dictionary where keys are vertex indices and values are lists of positions over time.
+
+    Returns:
+    - positions: (N, 3) array of initial positions.
+    - displacement_vectors: (N, 3) array of displacement vectors.
+    """
+    positions = []
+    displacement_vectors = []
+    for i in paths:
+        initial_position = paths[i][0]
+        final_position = paths[i][-1]
+        displacement_vector = final_position - initial_position
+        positions.append(initial_position)
+        displacement_vectors.append(displacement_vector)
+    positions = np.array(positions)
+    displacement_vectors = np.array(displacement_vectors)
+    return positions, displacement_vectors
+
+
+# Function to generate vector field
+def generate_vector_field(positions, displacement_vectors, grid_resolution=50):
+    """
+    Generate a vector field from the displacement vectors of the mesh vertices.
+
+    Parameters:
+    - positions: (N, 3) array of initial positions.
+    - displacement_vectors: (N, 3) array of displacement vectors.
+    - grid_resolution: Number of grid points along each axis.
+
+    Returns:
+    - grid_points: (M, 3) array of grid point coordinates.
+    - vectors: (M, 3) array of vectors at the grid points.
+    """
+    # Define the grid covering the space
+    min_coords = positions.min(axis=0)
+    max_coords = positions.max(axis=0)
+
+    xi = np.linspace(min_coords[0], max_coords[0], grid_resolution)
+    yi = np.linspace(min_coords[1], max_coords[1], grid_resolution)
+    zi = np.linspace(min_coords[2], max_coords[2], grid_resolution)
+    X, Y, Z = np.meshgrid(xi, yi, zi, indexing='ij')
+
+    grid_points = np.vstack([X.ravel(), Y.ravel(), Z.ravel()]).T
+
+    # Interpolate the displacement vectors onto the grid
+    from scipy.interpolate import griddata
+    vectors_x = griddata(positions, displacement_vectors[:, 0], grid_points, method='linear', fill_value=0)
+    vectors_y = griddata(positions, displacement_vectors[:, 1], grid_points, method='linear', fill_value=0)
+    vectors_z = griddata(positions, displacement_vectors[:, 2], grid_points, method='linear', fill_value=0)
+
+    vectors = np.vstack([vectors_x, vectors_y, vectors_z]).T
+
+    return grid_points, vectors
+
+# Visualize the 3D vector field
+def visualize_3D_vector_field(grid_points, vectors, voxel_size=0.1):
+    """
+    Visualize the 3D vector field with vectors confined within their voxels.
+
+    Parameters:
+    - grid_points: (M, 3) array of grid point coordinates.
+    - vectors: (M, 3) array of vectors at the grid points.
+    - voxel_size: The size of each voxel to scale vector length.
+    """
+    fig = plt.figure(figsize=(12, 12))
+    ax = fig.add_subplot(111, projection='3d')
+    
+    # Normalize vectors for visualization within voxels
+    vector_magnitudes = np.linalg.norm(vectors, axis=1)
+    vector_magnitudes[vector_magnitudes == 0] = 1  # Avoid division by zero
+    normalized_vectors = (vectors.T / vector_magnitudes).T * voxel_size
+
+    # Add quiver for vector visualization
+    ax.quiver(
+        grid_points[:, 0], grid_points[:, 1], grid_points[:, 2],
+        normalized_vectors[:, 0], normalized_vectors[:, 1], normalized_vectors[:, 2],
+        length=1.0, normalize=False, color='blue', linewidth=0.5, arrow_length_ratio=0.2
+    )
+
+    # Set axis labels and title
+    ax.set_xlabel("X-axis")
+    ax.set_ylabel("Y-axis")
+    ax.set_zlabel("Z-axis")
+    ax.set_title("3D Vector Field Visualization")
+    plt.show()
 
 
 # Main workflow
@@ -173,27 +287,18 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.3)
     white_matter = generate_flower_shape(center=(0, 0, 0), radius=1.0)
 
+    # Measure initial average edge length
+    initial_avg_edge_length = np.mean([np.linalg.norm(ventricle.vertices[edge[0]] - ventricle.vertices[edge[1]]) for edge in ventricle.edges_unique])
+
     meshes, paths, vectors_per_step = expand_ventricle_fixed_iterations(
-        ventricle, white_matter, fraction=0.1, voxel_size=0.05, max_iterations=30
+        ventricle, white_matter, fraction=0.1, target_edge_length=initial_avg_edge_length, max_iterations=10
     )
 
-    # Plot results for verification
-    for step, mesh in enumerate(meshes):
-        fig = plt.figure(figsize=(12, 12))
-        ax = fig.add_subplot(111, projection="3d")
-        ax.plot_trisurf(
-            mesh.vertices[:, 0],
-            mesh.vertices[:, 1],
-            mesh.vertices[:, 2],
-            triangles=mesh.faces,
-            color="green",
-            alpha=0.6,
-            edgecolor="grey",
-            linewidth=0.03,
-        )
-        ax.set_xlim(-1.5, 1.5)
-        ax.set_ylim(-1.5, 1.5)
-        ax.set_zlim(-1.5, 1.5)
-        ax.set_title(f"Expansion Step {step}")
-        plt.savefig(f"expansion_step_{step}.png")
-        plt.close()
+    # Collect total displacement vectors
+    positions, displacement_vectors = get_total_displacement_vectors(paths)
+
+    # Generate vector field
+    grid_points, vectors = generate_vector_field(positions, displacement_vectors, grid_resolution=50)
+
+    # Visualize the 3D vector field
+    visualize_3D_vector_field(grid_points, vectors, voxel_size=0.02)
