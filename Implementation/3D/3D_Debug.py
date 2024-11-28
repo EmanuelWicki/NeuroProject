@@ -59,7 +59,7 @@ def generate_bumpy_sphere(center, radius, resolution=20, bump_amplitude=0.03, bu
 
 
 # Generate a flower-shaped white matter boundary
-def generate_flower_shape(center, radius, resolution=150, petal_amplitude=1, petal_frequency=5):
+def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=5):
     u = np.linspace(0, 2 * np.pi, resolution)
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
@@ -196,20 +196,32 @@ def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.2):
 
 
 # Visualize the expansion process
-# Visualize the expansion process
-def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step):
+def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_dir="visualization_steps"):
     """
-    Visualize the ventricular mesh and white matter boundary at a given step.
+    Save the ventricular mesh and white matter boundary visualization at a given step.
 
     Parameters:
         - ventricle_mesh: Trimesh object for the ventricular mesh.
         - white_matter_mesh: Trimesh object for the white matter boundary.
-        - step: Current step number.
+        - step: Current step number (can be integer or string like 'Final').
+        - output_dir: Directory to save visualization images.
     """
+    import os
+
+    # Create the output directory if it doesn't exist
+    os.makedirs(output_dir, exist_ok=True)
+
+    # Format the step as part of the filename
+    if isinstance(step, int):
+        step_str = f"{step:03d}"
+    else:
+        step_str = str(step)
+
+    # Plot the meshes
     fig = plt.figure(figsize=(10, 8))
     ax = fig.add_subplot(111, projection="3d")
 
-    # Plot ventricular mesh
+    # Ventricular mesh
     ax.plot_trisurf(
         ventricle_mesh.vertices[:, 0],
         ventricle_mesh.vertices[:, 1],
@@ -222,7 +234,7 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step):
         label="Ventricular Mesh"
     )
 
-    # Plot white matter mesh
+    # White matter mesh
     ax.plot_trisurf(
         white_matter_mesh.vertices[:, 0],
         white_matter_mesh.vertices[:, 1],
@@ -235,12 +247,48 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step):
         label="White Matter Mesh"
     )
 
+    # Set plot details
     ax.set_title(f"Mesh at Step {step}")
     ax.set_xlabel("X-axis")
     ax.set_ylabel("Y-axis")
     ax.set_zlabel("Z-axis")
     ax.legend(loc="upper right")
-    plt.show()
+
+    # Save the figure as an image
+    output_path = os.path.join(output_dir, f"step_{step_str}.png")
+    plt.savefig(output_path, dpi=150)
+    plt.close(fig)  # Close the figure to avoid display
+    print(f"Visualization saved at {output_path}")
+
+
+def generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif"):
+    """
+    Generate a GIF from the saved visualization images.
+
+    Parameters:
+        - output_dir: Directory where visualization images are stored.
+        - gif_name: Name of the output GIF file.
+    """
+    import os
+    from PIL import Image
+
+    # Get all PNG files in the output directory
+    image_files = sorted(
+        [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
+    )
+
+    # Load images and create the GIF
+    images = [Image.open(file) for file in image_files]
+    gif_path = os.path.join(output_dir, gif_name)
+    images[0].save(
+        gif_path,
+        save_all=True,
+        append_images=images[1:],
+        duration=100,  # Duration between frames in milliseconds
+        loop=0  # Infinite loop
+    )
+
+    print(f"GIF saved at: {gif_path}")
 
 
 def compare_vertex_displacements(previous_vertices, current_vertices, step):
@@ -324,8 +372,11 @@ def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_
         ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.4)
 
         # Visualize every few steps
-        if step % 10 == 0 or step == steps - 1:
+        if step % 1 == 0 or step == steps - 1:
             visualize_expansion_process(ventricle, white_matter, step + 1)
+
+        # After the loop, generate the GIF
+        generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
 
     return ventricle
 
@@ -336,11 +387,14 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.3, resolution=20)
     white_matter = generate_flower_shape(center=(0, 0, 0), radius=1.0, resolution=40)
 
+    white_matter_face = np.mean(white_matter.area_faces)
+    print(f"Average face area of the white matter mesh: {white_matter_face}")
+
     expanded_ventricle = expand_ventricle(
         ventricle=ventricle,
         white_matter=white_matter,
-        steps=500,                # Number of expansion steps
-        fraction=0.2,            # Fraction of the intersection distance to expand
+        steps=200,                # Number of expansion steps
+        fraction=0.05,            # Fraction of the intersection distance to expand
         max_face_area=0.01      # Target maximum face area for remeshing
     )
 
@@ -350,4 +404,4 @@ if __name__ == "__main__":
     print(f"Face count: {len(expanded_ventricle.faces)}")
     print(f"Is watertight: {expanded_ventricle.is_watertight}")
 
-    visualize_expansion_process(expanded_ventricle, step="Final")
+    visualize_expansion_process(expanded_ventricle, white_matter, step="Final")
