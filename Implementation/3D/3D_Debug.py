@@ -328,7 +328,6 @@ def compare_vertex_displacements(previous_vertices, current_vertices, step):
 
 
 
-# Expand the ventricle mesh
 def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_area=0.002):
     previous_vertices = ventricle.vertices.copy()  # Save initial vertices
 
@@ -340,17 +339,21 @@ def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_
         new_vertices = []
 
         for vertex, normal in zip(ventricle.vertices, normals):
-            # Cast a ray to find the intersection point with the white matter
+            # Cast a ray in the normal direction to find the intersection point with the white matter
             locations, _, _ = white_matter.ray.intersects_location(
                 ray_origins=[vertex], ray_directions=[normal]
             )
 
             if locations.size > 0:
+                # Get the closest intersection point in the normal direction
                 closest_point = locations[0]
-                move_vector = (closest_point - vertex) * fraction
-                # print(f"move vector: {move_vector}")
+                intersection_distance = np.linalg.norm(closest_point - vertex)
+                
+                # Move the vertex by a fraction of the intersection distance
+                move_vector = normal * (intersection_distance * fraction)
                 new_vertex = vertex + move_vector
             else:
+                # If no intersection, the vertex does not move
                 new_vertex = vertex
 
             new_vertices.append(new_vertex)
@@ -374,10 +377,10 @@ def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_
         # Visualize every few steps
         if step % 1 == 0 or step == steps - 1:
             visualize_expansion_process(ventricle, white_matter, step + 1)
-
+       
         # After the loop, generate the GIF
         generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
-
+    
     return ventricle
 
 
@@ -385,7 +388,7 @@ def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_
 # Main function
 if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.3, resolution=20)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=1.0, resolution=40)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=1.0, resolution=200)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -394,8 +397,8 @@ if __name__ == "__main__":
         ventricle=ventricle,
         white_matter=white_matter,
         steps=200,                # Number of expansion steps
-        fraction=0.05,            # Fraction of the intersection distance to expand
-        max_face_area=0.01      # Target maximum face area for remeshing
+        fraction=0.2,            # Fraction of the intersection distance to expand
+        max_face_area=0.004      # Target maximum face area for remeshing
     )
 
     print("\nFinal Expanded Ventricle Mesh:")
