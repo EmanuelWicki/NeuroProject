@@ -2,7 +2,8 @@ import numpy as np
 import trimesh
 from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
-
+import pickle
+import logging
 
 # Generate a bumpy sphere mesh
 def generate_bumpy_sphere(center, radius, resolution=20, bump_amplitude=0.03, bump_frequency=3, asymmetry=0.02):
@@ -83,7 +84,7 @@ def calculate_corrected_vertex_normals(vertices, faces):
     return vertex_normals
 
 
-def laplacian_smoothing(mesh, iterations=3, lambda_factor=0.5):
+def laplacian_smoothing(mesh, iterations=3, lambda_factor=0.8):
     """
     Perform Laplacian smoothing on a mesh.
 
@@ -124,6 +125,13 @@ def resample_mesh(mesh, target_edge_length):
     vertices, faces = trimesh.remesh.subdivide_to_size(mesh.vertices, mesh.faces, max_edge=target_edge_length)
     return trimesh.Trimesh(vertices=vertices, faces=faces)
 
+def save_mesh(mesh, step):
+    """
+    Save the current mesh to a file.
+    """
+    filename = f"results/mesh_step_{step}.obj"
+    mesh.export(filename)
+    logging.info(f"Mesh saved: {filename}")
 
 # Expand ventricle with smoothing and resampling
 def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, target_edge_length=0.05, max_iterations=10):
@@ -167,7 +175,7 @@ def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, ta
         ventricle_mesh = trimesh.Trimesh(vertices=np.array(new_points), faces=ventricle_mesh.faces)
 
         # Apply Laplacian smoothing
-        ventricle_mesh = laplacian_smoothing(ventricle_mesh, iterations=3, lambda_factor=0.5)
+        ventricle_mesh = laplacian_smoothing(ventricle_mesh, iterations=3, lambda_factor=0.8)
 
         # Resample the mesh to maintain density
         resampled_mesh = resample_mesh(ventricle_mesh, target_edge_length)
@@ -183,6 +191,8 @@ def expand_ventricle_fixed_iterations(ventricle, white_matter, fraction=0.02, ta
         paths = new_paths
         ventricle_mesh = resampled_mesh
         meshes.append(ventricle_mesh)
+        
+        save_mesh(ventricle_mesh, step + 1)
 
         print(f"Step {step + 1} completed. Points updated: {len(ventricle_mesh.vertices)}")
 
@@ -301,4 +311,4 @@ if __name__ == "__main__":
     grid_points, vectors = generate_vector_field(positions, displacement_vectors, grid_resolution=50)
 
     # Visualize the 3D vector field
-    visualize_3D_vector_field(grid_points, vectors, voxel_size=0.02)
+    # visualize_3D_vector_field(grid_points, vectors, voxel_size=0.02)
