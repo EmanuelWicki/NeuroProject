@@ -1,14 +1,16 @@
 import numpy as np
 import trimesh
 import os
-from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
+import alphashape
+from shapely import Polygon
+from scipy.spatial import Delaunay
 from pymeshfix import MeshFix
 from trimesh.remesh import subdivide
 from PIL import Image
 
 # Generate a bumpy sphere mesh
-def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, bump_frequency=2, output_dir="ventricle_steps"):
+def generate_bumpy_sphere(center, radius=0.2, resolution=50, output_dir="ventricle_steps"):
     """
     Generate a bumpy sphere mesh with a watertight surface.
 
@@ -32,13 +34,10 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
 
-    # Apply bumps to the radius
-    r = radius + bump_amplitude * (np.sin(bump_frequency * u) + np.sin(bump_frequency * v)) / 2
-
     # Spherical coordinate conversion
-    x = center[0] + r * np.sin(v) * np.cos(u)
-    y = center[1] + r * np.sin(v) * np.sin(u)
-    z = center[2] + r * np.cos(v)
+    x = center[0] + radius * np.sin(v) * np.cos(u)
+    y = center[1] + radius * np.sin(v) * np.sin(u)
+    z = center[2] + radius * np.cos(v)
 
     # Flatten the grid for triangulation
     vertices = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
@@ -58,7 +57,7 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
     mesh.remove_degenerate_faces()  # Remove bad faces
     mesh.remove_duplicate_faces()  # Remove duplicate faces
     mesh.remove_unreferenced_vertices()  # Remove unused vertices
-    mesh = trimesh.convex.convex_hull(mesh)  # Ensure convexity if necessary
+    # mesh = trimesh.convex.convex_hull(mesh)  # Ensure convexity if necessary
 
     # Check if the mesh is watertight
     if not mesh.is_watertight:
@@ -118,22 +117,79 @@ def generate_pyramid(center, base_length, height):
 '''
 
 def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
+    """
+    Generate a flower-shaped mesh with a watertight surface.
+
+    Parameters:
+        - center: Center of the shape (tuple of 3 floats).
+        - radius: Radius of the shape.
+        - resolution: Number of subdivisions along latitude and longitude.
+        - petal_amplitude: Amplitude of the flower petal deformation.
+        - petal_frequency: Frequency of the petal deformation.
+        - output_dir: Directory to save the processed mesh.
+
+    Returns:
+        - mesh: Smooth, watertight Trimesh object with petal-like deformations.
+    """
+
+    output_dir = "ventricle_steps"
+
+    # Generate parametric flower-like shape coordinates
     u = np.linspace(0, 2 * np.pi, resolution)
     v = np.linspace(0, np.pi, resolution)
     u, v = np.meshgrid(u, v)
 
+    # Apply petal deformation to the radius
     r = radius + petal_amplitude * np.sin(petal_frequency * v) * np.sin(petal_frequency * u)
 
+    # Convert spherical coordinates to Cartesian coordinates
     x = center[0] + r * np.sin(v) * np.cos(u)
     y = center[1] + r * np.sin(v) * np.sin(u)
     z = center[2] + r * np.cos(v)
 
+    # Flatten the grid for triangulation
     vertices = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
     points2D = np.vstack((u.flatten(), v.flatten())).T
+
+    # Perform Delaunay triangulation in 2D parameter space
     delaunay = Delaunay(points2D)
     faces = delaunay.simplices
 
-    return trimesh.Trimesh(vertices=vertices, faces=faces)
+    # Create the Trimesh object
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+    
+    print("Raw mesh:")
+    step_filename = os.path.join(output_dir, f"WM_Raw.obj")
+    mesh.export(step_filename)
+
+    # Ensure watertightness and clean the mesh
+    print("Processing and cleaning the flower-shaped mesh...")
+    mesh.process(validate=True)  # Fix normals and connectivity
+    mesh.fill_holes()  # Fill gaps in the mesh
+    
+    # print("After filling holes:")
+    step_filename = os.path.join(output_dir, f"WM_AfterHoleFill.obj")
+    mesh.export(step_filename)
+
+    mesh.remove_degenerate_faces()  # Remove bad faces
+    mesh.remove_duplicate_faces()  # Remove duplicate faces
+    mesh.remove_unreferenced_vertices()  # Remove unused vertices
+    # mesh = trimesh.convex.convex_hull(mesh)  # Ensure convexity if necessary
+
+    # Check if the mesh is watertight
+    if not mesh.is_watertight:
+        print("Warning: The flower-shaped mesh is still not watertight after processing.")
+    else:
+        print("Flower-shaped mesh is watertight.")
+
+    # Apply Laplacian smoothing
+    mesh = laplacian_smoothing(mesh, iterations=2, lambda_factor=1)
+
+    # print("After smoothing:")
+    step_filename = os.path.join(output_dir, f"WM_AfterSmooth.obj")
+    mesh.export(step_filename)
+
+    return mesh
 
 def refine_pyramid(mesh, splits=1):
     """
@@ -156,6 +212,27 @@ def refine_pyramid(mesh, splits=1):
 
     return trimesh.Trimesh(vertices=vertices, faces=faces)
 
+
+def create_concave_hull(mesh, alpha=0.5):
+    """
+    Generate a concave hull (alpha shape) for the mesh.
+
+    Parameters:
+        - mesh: Trimesh object to process.
+        - alpha: Alpha parameter controlling hull tightness (smaller is tighter).
+
+    Returns:
+        - Concave hull Trimesh object.
+    """
+    points = mesh.vertices
+    shape = alphashape.alphashape(points, alpha)
+
+    # Convert to Trimesh if the shape is valid
+    if isinstance(shape, Polygon):
+        hull = trimesh.Trimesh(vertices=np.array(shape.exterior.coords), faces=[])
+    else:
+        hull = trimesh.Trimesh(vertices=points, faces=mesh.faces)
+    return hull
 
 # Calculate corrected vertex normals
 def calculate_corrected_vertex_normals(vertices, faces):
@@ -567,6 +644,14 @@ def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_
         # After the loop, generate the GIF
         generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
 
+        white_matter = laplacian_smoothing(white_matter, iterations=3, lambda_factor=1)
+        white_matter.fill_holes()
+        white_matter.remove_degenerate_faces()
+        white_matter.remove_unreferenced_vertices()
+        white_matter = laplacian_smoothing(white_matter, iterations=3, lambda_factor=1)
+
+
+
     return ventricle
 
 
@@ -577,7 +662,8 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.6, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.6, resolution=200, petal_amplitude=0.01, petal_frequency=20)
+    white_matter = create_concave_hull(white_matter, alpha=0.1)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
