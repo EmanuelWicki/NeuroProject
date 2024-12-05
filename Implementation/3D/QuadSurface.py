@@ -339,6 +339,53 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
     plt.close(fig)  # Close the figure to avoid display
     print(f"Visualization saved at {output_path}")
 
+import trimesh
+
+def export_with_transparency(ventricle_mesh, white_matter_mesh, output_path):
+    """
+    Export the ventricle and white matter meshes together with transparency applied to the white matter.
+
+    Parameters:
+        - ventricle_mesh: Trimesh object for the ventricular surface.
+        - white_matter_mesh: Trimesh object for the white matter boundary.
+        - output_path: Path to save the combined .obj file (e.g., 'output.obj').
+    """
+    # Create a scene and add both meshes
+    scene = trimesh.Scene()
+    scene.add_geometry(ventricle_mesh, node_name="ventricle")
+    scene.add_geometry(white_matter_mesh, node_name="white_matter")
+
+    # Export the scene to an .obj file
+    obj_path = output_path
+    mtl_path = obj_path.replace('.obj', '.mtl')
+
+    # Write .obj and associated .mtl file
+    with open(obj_path, 'w') as obj_file, open(mtl_path, 'w') as mtl_file:
+        # Define material for ventricle (opaque)
+        mtl_file.write("newmtl ventricle_material\n")
+        mtl_file.write("Kd 1.0 0.0 0.0\n")  # Red color
+        mtl_file.write("d 1.0\n")            # Full opacity
+        mtl_file.write("\n")
+
+        # Define material for white matter (semi-transparent)
+        mtl_file.write("newmtl white_matter_material\n")
+        mtl_file.write("Kd 0.8 0.8 0.8\n")  # Light gray color
+        mtl_file.write("d 0.2\n")           # 20% opacity
+        mtl_file.write("\n")
+
+        # Write object data for ventricle
+        obj_file.write("mtllib " + mtl_path.split('/')[-1] + "\n")
+        obj_file.write("o ventricle\n")
+        obj_file.write("usemtl ventricle_material\n")
+        obj_file.write(ventricle_mesh.export(file_type='obj'))
+
+        # Write object data for white matter
+        obj_file.write("o white_matter\n")
+        obj_file.write("usemtl white_matter_material\n")
+        obj_file.write(white_matter_mesh.export(file_type='obj'))
+
+    print(f"Exported combined mesh to {obj_path} with transparency.")
+
 
 
 def generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif"):
@@ -464,10 +511,14 @@ def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_
                 # Get the closest intersection point in the normal direction
                 closest_point = locations[0]
                 intersection_distance = np.linalg.norm(closest_point - vertex)
-                
-                # Move the vertex by a fraction of the intersection distance
-                move_vector = normal * (intersection_distance * fraction)
-                new_vertex = vertex + move_vector
+
+                # Only consider valid intersections
+                if intersection_distance > 1e-3:  # Ignore very close intersections
+                    move_vector = normal * (intersection_distance * fraction)
+                    new_vertex = vertex + move_vector
+                else:
+                    # Do not move the vertex if intersection is invalid
+                    new_vertex = vertex
             else:
                 # If no intersection, the vertex does not move
                 new_vertex = vertex
@@ -483,15 +534,35 @@ def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_
         # Apply smoothing
         ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=1)
 
+
+########################################################################################################
+        # Debugging, checking for intersecting regions of the two meshes
+        ventricle_vertices = ventricle.vertices
+        white_matter_vertices = white_matter.vertices
+
+        # Compute distances between all ventricle and white matter vertices
+        distances = np.linalg.norm(ventricle_vertices[:, None] - white_matter_vertices[None, :], axis=2)
+        # Check for overlaps (distance close to 0)
+        overlap_indices = np.where(distances < 1e-6)
+        if len(overlap_indices[0]) > 0:
+            print("Overlapping vertices found!")
+            print("Indices of overlaps:", overlap_indices)
+        else:
+            print("No overlaps Detected!")
+#######################################################################################################
+
         # Visualize every few steps
         if step % 1 == 0 or step == steps - 1:
             visualize_expansion_process(ventricle, white_matter, step + 1)
 
-        # Save the ventricle as an .obj file
-        output_dir="ventricle_steps"
-        step_filename = os.path.join(output_dir, f"ventricle_step_{step + 1}.obj")
-        ventricle.export(step_filename)
-        print(f"Saved initial bumpy sphere at step {step + 1} to {step_filename}")
+        # Save the ventricle and white matter meshes as a combined .obj file
+        output_dir = "ventricle_steps"
+        step_filename = os.path.join(output_dir, f"ventricle_with_white_matter_step_{step + 1}.obj")
+        export_with_transparency(
+            ventricle_mesh=ventricle,
+            white_matter_mesh=white_matter,
+            output_path=step_filename
+        )
 
         # After the loop, generate the GIF
         generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
@@ -506,10 +577,25 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.5, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.6, resolution=200, petal_amplitude=0.3, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
+
+    ventricle_vertices = ventricle.vertices
+    white_matter_vertices = white_matter.vertices
+
+    # Compute distances between all ventricle and white matter vertices
+    distances = np.linalg.norm(ventricle_vertices[:, None] - white_matter_vertices[None, :], axis=2)
+
+    # Check for overlaps (distance close to 0)
+    overlap_indices = np.where(distances < 1e-6)
+    if len(overlap_indices[0]) > 0:
+        print("Overlapping vertices found!")
+        print("Indices of overlaps:", overlap_indices)
+    else:
+        print("No overlaps Detected!")
+
 
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
