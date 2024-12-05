@@ -5,7 +5,7 @@ from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
 from pymeshfix import MeshFix
 from trimesh.remesh import subdivide
-
+from PIL import Image
 
 # Generate a bumpy sphere mesh
 def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, bump_frequency=2, output_dir="ventricle_steps"):
@@ -76,7 +76,7 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
     return mesh
 
 
-
+'''
 # Generate a flower-shaped white matter boundary
 def generate_pyramid(center, base_length, height):
     """
@@ -115,6 +115,25 @@ def generate_pyramid(center, base_length, height):
     # Create the Trimesh object
     pyramid_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
     return pyramid_mesh
+'''
+
+def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
+    u = np.linspace(0, 2 * np.pi, resolution)
+    v = np.linspace(0, np.pi, resolution)
+    u, v = np.meshgrid(u, v)
+
+    r = radius + petal_amplitude * np.sin(petal_frequency * v) * np.sin(petal_frequency * u)
+
+    x = center[0] + r * np.sin(v) * np.cos(u)
+    y = center[1] + r * np.sin(v) * np.sin(u)
+    z = center[2] + r * np.cos(v)
+
+    vertices = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
+    points2D = np.vstack((u.flatten(), v.flatten())).T
+    delaunay = Delaunay(points2D)
+    faces = delaunay.simplices
+
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
 
 def refine_pyramid(mesh, splits=1):
     """
@@ -321,6 +340,7 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
     print(f"Visualization saved at {output_path}")
 
 
+
 def generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif"):
     """
     Generate a GIF from the saved visualization images.
@@ -329,17 +349,20 @@ def generate_growth_gif(output_dir="visualization_steps", gif_name="growth_anima
         - output_dir: Directory where visualization images are stored.
         - gif_name: Name of the output GIF file.
     """
-    import os
-    from PIL import Image
+    # Ensure proper handling of paths
+    gif_path = os.path.join(output_dir, gif_name)
 
     # Get all PNG files in the output directory
     image_files = sorted(
         [os.path.join(output_dir, f) for f in os.listdir(output_dir) if f.endswith(".png")]
     )
 
+    # Check if image files exist
+    if not image_files:
+        raise FileNotFoundError("No PNG files found in the specified output directory.")
+
     # Load images and create the GIF
     images = [Image.open(file) for file in image_files]
-    gif_path = os.path.join(output_dir, gif_name)
     images[0].save(
         gif_path,
         save_all=True,
@@ -388,11 +411,44 @@ def compare_vertex_displacements(previous_vertices, current_vertices, step):
 
 
 
-def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_area=0.002):
+def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_min=0.01, f_max=0.4):
+    """
+    Expand the ventricle mesh dynamically by adjusting the expansion fraction
+    based on the volume ratio between the ventricular mesh and white matter mesh,
+    automatically accounting for the initial volume ratio.
+
+    Parameters:
+        - ventricle: Trimesh object representing the ventricle.
+        - white_matter: Trimesh object representing the white matter.
+        - steps: Number of expansion steps.
+        - f_min: Minimum fraction for expansion.
+        - f_max: Maximum fraction for expansion.
+
+    Returns:
+        - ventricle: Expanded Trimesh object.
+    """
+    # Calculate initial volume ratio
+    initial_ventricle_volume = ventricle.volume
+    white_matter_volume = white_matter.volume
+    initial_ratio = initial_ventricle_volume / white_matter_volume
+
+    print(f"Initial Volume Ratio: {initial_ratio:.4f}")
+
     previous_vertices = ventricle.vertices.copy()  # Save initial vertices
 
     for step in range(steps):
+        # Calculate the current volume ratio
+        current_ventricle_volume = ventricle.volume
+        current_ratio = abs(current_ventricle_volume / white_matter_volume)
+
+        # Dynamically adjust the fraction
+        if current_ratio <= 0.8:
+            fraction = f_min + ((f_max - f_min) / (0.8 - initial_ratio)) * (current_ratio - initial_ratio)
+        else:
+            fraction = f_max
+
         print(f"\nStep {step + 1}/{steps}")
+        print(f"  Current Volume Ratio: {current_ratio:.4f}, Expansion Fraction: {fraction:.4f}")
 
         # Compute normals for the current vertices
         normals = calculate_corrected_vertex_normals(ventricle.vertices, ventricle.faces)
@@ -421,45 +477,46 @@ def expand_ventricle(ventricle, white_matter, steps=10, fraction=0.05, max_face_
         # Update the mesh with the new vertex positions
         ventricle = trimesh.Trimesh(vertices=np.array(new_vertices), faces=ventricle.faces)
 
-        # Compare vertex displacements starting from step 2
-        if step > 0:
-            compare_vertex_displacements(previous_vertices, ventricle.vertices, step + 1)
-
-        # Save current vertices for the next step comparison
-        previous_vertices = ventricle.vertices.copy()
-
-        # Remesh using face area
-        ventricle = remesh_to_constant_face_area(ventricle, max_face_area)
+        # Remesh using face area (optional to maintain consistency)
+        ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.004)
 
         # Apply smoothing
-        ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.4)
+        ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=1)
 
         # Visualize every few steps
         if step % 1 == 0 or step == steps - 1:
             visualize_expansion_process(ventricle, white_matter, step + 1)
-       
+
+        # Save the ventricle as an .obj file
+        output_dir="ventricle_steps"
+        step_filename = os.path.join(output_dir, f"ventricle_step_{step + 1}.obj")
+        ventricle.export(step_filename)
+        print(f"Saved initial bumpy sphere at step {step + 1} to {step_filename}")
+
         # After the loop, generate the GIF
         generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
-    
+
     return ventricle
+
 
 
 
 # Main function
 if __name__ == "__main__":
-    ventricle = generate_bumpy_sphere(center=(0., 0, 0.3), radius=0.2, resolution=30)
-    white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
-    white_matter = refine_pyramid(white_matter, splits=4)
+    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
+    # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
+    # white_matter = refine_pyramid(white_matter, splits=4)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.5, resolution=200, petal_amplitude=0.3, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
 
-    expanded_ventricle = expand_ventricle(
-        ventricle=ventricle,
-        white_matter=white_matter,
-        steps=40,                # Number of expansion steps
-        fraction=0.2,            # Fraction of the intersection distance to expand
-        max_face_area=0.004      # Target maximum face area for remeshing
+    expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
+        ventricle = ventricle, 
+        white_matter = white_matter, 
+        steps=200, 
+        f_min=0.01, 
+        f_max=0.4
     )
 
     print("\nFinal Expanded Ventricle Mesh:")
