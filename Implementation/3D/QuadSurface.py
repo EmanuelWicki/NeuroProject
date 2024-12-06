@@ -6,6 +6,26 @@ import matplotlib.pyplot as plt
 from pymeshfix import MeshFix
 from trimesh.remesh import subdivide
 from PIL import Image
+import pyvista as pv
+
+def FixMesh(mesh, enforce_convexity=False):
+    mesh.process(validate=True)
+    mesh.fill_holes()
+    mesh.remove_degenerate_faces()
+    mesh.remove_duplicate_faces()
+    mesh.remove_unreferenced_vertices()
+    if enforce_convexity:
+        mesh = trimesh.convex.convex_hull(mesh)
+    
+    # Check if the mesh is watertight
+    if not mesh.is_watertight:
+        print("Warning: The mesh is still not watertight after processing.")
+    else:
+        print("Bumpy sphere mesh is watertight.")
+
+    mesh = laplacian_smoothing(mesh, iterations=5, lambda_factor=0.9)
+
+    return mesh
 
 # Generate a bumpy sphere mesh
 def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, bump_frequency=2, output_dir="ventricle_steps"):
@@ -52,21 +72,7 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
     # Ensure watertightness
-    print("Processing and cleaning the bumpy sphere mesh...")
-    mesh.process(validate=True)  # Fix normals and connectivity
-    mesh.fill_holes()  # Fill gaps in the mesh
-    mesh.remove_degenerate_faces()  # Remove bad faces
-    mesh.remove_duplicate_faces()  # Remove duplicate faces
-    mesh.remove_unreferenced_vertices()  # Remove unused vertices
-    mesh = trimesh.convex.convex_hull(mesh)  # Ensure convexity if necessary
-
-    # Check if the mesh is watertight
-    if not mesh.is_watertight:
-        print("Warning: The mesh is still not watertight after processing.")
-    else:
-        print("Bumpy sphere mesh is watertight.")
-
-    mesh = laplacian_smoothing(mesh, iterations=5, lambda_factor=0.9)
+    mesh = FixMesh(mesh, enforce_convexity=True)
 
     # Save the initial bumpy sphere as an .obj file
     step_filename = os.path.join(output_dir, f"ventricle_step_0.obj")
@@ -75,47 +81,57 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
 
     return mesh
 
-
-'''
-# Generate a flower-shaped white matter boundary
-def generate_pyramid(center, base_length, height):
+def trimesh_to_pyvista(mesh):
     """
-    Generate a simple pyramid mesh.
-
+    Convert a Trimesh object to a PyVista-compatible PolyData object.
+    
     Parameters:
-        - center: Center of the pyramid base (tuple of 3 floats).
-        - base_length: Length of the pyramid base (square base).
-        - height: Height of the pyramid from the base to the apex.
-
+        - mesh: Trimesh object to convert.
+    
     Returns:
-        - Trimesh object representing the pyramid.
+        - pyvista_mesh: PyVista PolyData object.
     """
-    # Calculate half the base length
-    half_base = base_length / 2.0
 
-    # Define vertices
-    vertices = np.array([
-        [center[0] - half_base, center[1] - half_base, center[2]],  # Bottom-left corner of base
-        [center[0] + half_base, center[1] - half_base, center[2]],  # Bottom-right corner of base
-        [center[0] + half_base, center[1] + half_base, center[2]],  # Top-right corner of base
-        [center[0] - half_base, center[1] + half_base, center[2]],  # Top-left corner of base
-        [center[0], center[1], center[2] + height]                 # Apex of the pyramid
-    ])
+    # Extract vertices and faces
+    vertices = mesh.vertices
+    faces = mesh.faces
 
-    # Define faces (triangles) using vertex indices
-    faces = np.array([
-        [0, 1, 4],  # Base to apex (side 1)
-        [1, 2, 4],  # Base to apex (side 2)
-        [2, 3, 4],  # Base to apex (side 3)
-        [3, 0, 4],  # Base to apex (side 4)
-        [0, 1, 2],  # Base (triangle 1)
-        [2, 3, 0]   # Base (triangle 2)
-    ])
+    # Convert faces to PyVista-compatible format
+    n_faces = len(faces)
+    pyvista_faces = np.empty((n_faces, 4), dtype=int)
+    pyvista_faces[:, 0] = 3  # Number of vertices per face (triangles)
+    pyvista_faces[:, 1:] = faces
 
-    # Create the Trimesh object
-    pyramid_mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-    return pyramid_mesh
-'''
+    # Flatten the array to match PyVista's input format
+    pyvista_faces = pyvista_faces.flatten()
+
+    # Create and return a PyVista PolyData object
+    return pv.PolyData(vertices, pyvista_faces)
+
+def visualize_with_pyvista(ventricle, white_matter):
+    """
+    Visualize the ventricle and white matter meshes using PyVista.
+    
+    Parameters:
+        - ventricle: Trimesh object for the ventricle.
+        - white_matter: Trimesh object for the white matter.
+    """
+    # Convert Trimesh objects to PyVista meshes
+    ventricle_pv = trimesh_to_pyvista(ventricle)
+    white_matter_pv = trimesh_to_pyvista(white_matter)
+
+    # Initialize the PyVista plotter
+    plotter = pv.Plotter()
+    
+    # Add the white matter mesh (transparent)
+    plotter.add_mesh(white_matter_pv, color="lightgray", opacity=0.2, label="White Matter Mesh")
+    
+    # Add the ventricle mesh (blue and semi-transparent)
+    plotter.add_mesh(ventricle_pv, color="blue", opacity=0.6, label="Ventricle Mesh")
+
+    # Add legend and display
+    plotter.add_legend()
+    plotter.show()
 
 def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
     u = np.linspace(0, 2 * np.pi, resolution)
@@ -132,27 +148,6 @@ def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, pet
     points2D = np.vstack((u.flatten(), v.flatten())).T
     delaunay = Delaunay(points2D)
     faces = delaunay.simplices
-
-    return trimesh.Trimesh(vertices=vertices, faces=faces)
-
-def refine_pyramid(mesh, splits=1):
-    """
-    Refine the pyramid mesh by subdividing its faces.
-    
-    Parameters:
-        - mesh: Trimesh object representing the pyramid.
-        - splits: Number of subdivisions to apply.
-    
-    Returns:
-        - Refined Trimesh object.
-    """
-    from trimesh.remesh import subdivide
-
-    vertices = mesh.vertices
-    faces = mesh.faces
-
-    for _ in range(splits):
-        vertices, faces = subdivide(vertices, faces)
 
     return trimesh.Trimesh(vertices=vertices, faces=faces)
 
@@ -411,11 +406,18 @@ def compare_vertex_displacements(previous_vertices, current_vertices, step):
 
 
 
-def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_min=0.01, f_max=0.4):
+def expand_ventricle_dynamic_fraction_auto(
+    ventricle,
+    white_matter,
+    steps=40,
+    f_min=0.01,
+    f_max=0.4,
+    thresholds=[0.01, 0.02, 0.03],  # Threshold distances
+    percentages=[0.9, 0.95, 1.0]    # Percentage of vertices required within each threshold
+):
     """
-    Expand the ventricle mesh dynamically by adjusting the expansion fraction
-    based on the volume ratio between the ventricular mesh and white matter mesh,
-    automatically accounting for the initial volume ratio.
+    Expand the ventricle mesh dynamically in stages, ensuring vertices do not cross
+    the white matter boundary.
 
     Parameters:
         - ventricle: Trimesh object representing the ventricle.
@@ -423,81 +425,117 @@ def expand_ventricle_dynamic_fraction_auto(ventricle, white_matter, steps=40, f_
         - steps: Number of expansion steps.
         - f_min: Minimum fraction for expansion.
         - f_max: Maximum fraction for expansion.
+        - thresholds: List of distances for each stage.
+        - percentages: List of percentages of vertices required within each threshold.
 
     Returns:
         - ventricle: Expanded Trimesh object.
     """
-    # Calculate initial volume ratio
-    initial_ventricle_volume = ventricle.volume
-    white_matter_volume = white_matter.volume
-    initial_ratio = initial_ventricle_volume / white_matter_volume
+    assert len(thresholds) == len(percentages), "Thresholds and percentages must have the same length."
+    
+    num_stages = len(thresholds)
+    fixed_vertices = np.zeros(len(ventricle.vertices), dtype=bool)  # Track fixed vertices
 
-    print(f"Initial Volume Ratio: {initial_ratio:.4f}")
+    # Create a copy of the white matter mesh for visualization purposes
+    initial_ventricle_volume  = ventricle.volume
+    white_matter_visualization = white_matter.copy()
+    white_matter_volume = white_matter_visualization.volume
+    initial_ratio = abs(initial_ventricle_volume / white_matter_volume)
 
-    previous_vertices = ventricle.vertices.copy()  # Save initial vertices
+    print(f"Initial ventricle volume: {ventricle.volume:.4f}")
+    print(f"White matter volume: {white_matter.volume:.4f}")
 
-    for step in range(steps):
-        # Calculate the current volume ratio
-        current_ventricle_volume = ventricle.volume
-        current_ratio = abs(current_ventricle_volume / white_matter_volume)
+    for stage_idx, (threshold, percentage) in enumerate(zip(thresholds, percentages)):
+        print(f"\nStarting Stage {stage_idx + 1}/{num_stages} - Threshold: {threshold}, Required Percentage: {percentage * 100}%")
+        
+        for step in range(steps):
+            # Save current vertices before remeshing
+            previous_vertices = ventricle.vertices.copy()
 
-        # Dynamically adjust the fraction
-        if current_ratio <= 0.8:
-            fraction = f_min + ((f_max - f_min) / (0.8 - initial_ratio)) * (current_ratio - initial_ratio)
-        else:
-            fraction = f_max
+            # Calculate normals and distances
+            normals = calculate_corrected_vertex_normals(previous_vertices, ventricle.faces)
+            distances = np.full(len(previous_vertices), np.inf)  # Initialize distances
 
-        print(f"\nStep {step + 1}/{steps}")
-        print(f"  Current Volume Ratio: {current_ratio:.4f}, Expansion Fraction: {fraction:.4f}")
+            for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
+                if fixed_vertices[i]:
+                    continue  # Skip fixed vertices
 
-        # Compute normals for the current vertices
-        normals = calculate_corrected_vertex_normals(ventricle.vertices, ventricle.faces)
-        new_vertices = []
+                locations, _, _ = white_matter.ray.intersects_location(
+                    ray_origins=[vertex], ray_directions=[normal]
+                )
+                if locations.size > 0:
+                    closest_point = locations[0]
+                    intersection_distance = np.linalg.norm(closest_point - vertex)
+                    distances[i] = intersection_distance  # Record the distance
 
-        for vertex, normal in zip(ventricle.vertices, normals):
-            # Cast a ray in the normal direction to find the intersection point with the white matter
-            locations, _, _ = white_matter.ray.intersects_location(
-                ray_origins=[vertex], ray_directions=[normal]
-            )
+            # Dynamically adjust the fraction for movement
+            current_volume = ventricle.volume
+            volume_ratio = abs(current_volume / white_matter_volume)
 
-            if locations.size > 0:
-                # Get the closest intersection point in the normal direction
-                closest_point = locations[0]
-                intersection_distance = np.linalg.norm(closest_point - vertex)
-                
-                # Move the vertex by a fraction of the intersection distance
-                move_vector = normal * (intersection_distance * fraction)
-                new_vertex = vertex + move_vector
+            if volume_ratio <= 0.8:
+                fraction = f_min + ((f_max - f_min) / (0.8 - initial_ratio)) * (volume_ratio - initial_ratio)
             else:
-                # If no intersection, the vertex does not move
-                new_vertex = vertex
+                fraction = f_max
+            
+            print(f"\nStep {step + 1}: Volume Ratio = {volume_ratio:.4f}, Expansion Fraction = {fraction:.4f}")
 
-            new_vertices.append(new_vertex)
+            # Mark vertices within the threshold as fixed
+            within_threshold = distances <= threshold
+            fixed_vertices |= within_threshold  # Update fixed vertices
 
-        # Update the mesh with the new vertex positions
-        ventricle = trimesh.Trimesh(vertices=np.array(new_vertices), faces=ventricle.faces)
+            # Calculate the percentage of vertices within the threshold
+            current_percentage = np.mean(within_threshold)
+            print(f"Step {step + 1}: {current_percentage * 100:.2f}% of vertices within threshold.")
 
-        # Remesh using face area (optional to maintain consistency)
-        ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.004)
+            if current_percentage >= percentage:
+                print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
+                break
 
-        # Apply smoothing
-        ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=1)
+            # Expand non-fixed vertices
+            new_vertices = ventricle.vertices.copy()
+            for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
+                if fixed_vertices[i]:
+                    continue  # Skip fixed vertices
 
-        # Visualize every few steps
-        if step % 1 == 0 or step == steps - 1:
-            visualize_expansion_process(ventricle, white_matter, step + 1)
+                if distances[i] < np.inf:  # If intersection is found
+                    move_vector = normal * min(distances[i] * fraction, distances[i])
+                    new_vertices[i] = vertex + move_vector
 
-        # Save the ventricle as an .obj file
-        output_dir="ventricle_steps"
-        step_filename = os.path.join(output_dir, f"ventricle_step_{step + 1}.obj")
-        ventricle.export(step_filename)
-        print(f"Saved initial bumpy sphere at step {step + 1} to {step_filename}")
+            # Update the ventricle mesh
+            ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
-        # After the loop, generate the GIF
-        generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
+            # Remesh using face area
+            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
+
+            # Update fixed_vertices to match the new vertex count
+            new_vertex_count = len(ventricle.vertices)
+            if len(fixed_vertices) != new_vertex_count:
+                print(f"Updating fixed vertices: Old count = {len(fixed_vertices)}, New count = {new_vertex_count}")
+                new_fixed_vertices = np.zeros(new_vertex_count, dtype=bool)
+
+                # Match fixed vertices to the new vertex array
+                for old_idx, is_fixed in enumerate(fixed_vertices):
+                    if is_fixed:
+                        # Find the closest new vertex to the old vertex
+                        old_vertex = previous_vertices[old_idx]
+                        closest_new_idx = np.argmin(np.linalg.norm(ventricle.vertices - old_vertex, axis=1))
+                        new_fixed_vertices[closest_new_idx] = True
+
+                fixed_vertices = new_fixed_vertices
+
+            # Apply smoothing
+            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.9)
+            # Visualize Meshes
+            visualize_with_pyvista(ventricle, white_matter)
+
+            # Visualize and save the current state
+            visualize_expansion_process(ventricle, white_matter_visualization, step=f"Stage{stage_idx + 1}_Step{step + 1}")
+
+    # After the loop, generate the GIF
+    generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
+    print("\nAll stages completed.")
 
     return ventricle
-
 
 
 
@@ -506,7 +544,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.5, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.8, resolution=200, petal_amplitude=0.3, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -514,9 +552,11 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=200, 
-        f_min=0.01, 
-        f_max=0.4
+        steps=30, 
+        f_min=0.02, 
+        f_max=0.4,
+        thresholds=[0.06, 0.03, 0.02],  # Stages with thresholds
+        percentages=[0.9, 0.95, 1.0]    # Required percentages
     )
 
     print("\nFinal Expanded Ventricle Mesh:")
