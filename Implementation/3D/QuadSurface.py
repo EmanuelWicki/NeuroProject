@@ -108,30 +108,73 @@ def trimesh_to_pyvista(mesh):
     # Create and return a PyVista PolyData object
     return pv.PolyData(vertices, pyvista_faces)
 
-def visualize_with_pyvista(ventricle, white_matter):
+def visualize_with_pyvista_live(ventricle, white_matter, plotter=None):
     """
-    Visualize the ventricle and white matter meshes using PyVista.
+    Visualize the ventricle and white matter meshes dynamically with PyVista.
+    The plot is updated live without closing the window.
     
     Parameters:
-        - ventricle: Trimesh object for the ventricle.
-        - white_matter: Trimesh object for the white matter.
+        - ventricle: Trimesh object for the ventricle mesh.
+        - white_matter: Trimesh object for the white matter mesh.
+        - plotter: Optional PyVista Plotter object to allow live updates.
     """
-    # Convert Trimesh objects to PyVista meshes
-    ventricle_pv = trimesh_to_pyvista(ventricle)
-    white_matter_pv = trimesh_to_pyvista(white_matter)
+    # Convert Trimesh objects to PyVista PolyData
+    ventricle_pv = pv.PolyData(ventricle.vertices, np.hstack([np.full((len(ventricle.faces), 1), 3), ventricle.faces]).ravel())
+    white_matter_pv = pv.PolyData(white_matter.vertices, np.hstack([np.full((len(white_matter.faces), 1), 3), white_matter.faces]).ravel())
 
-    # Initialize the PyVista plotter
-    plotter = pv.Plotter()
-    
-    # Add the white matter mesh (transparent)
-    plotter.add_mesh(white_matter_pv, color="lightgray", opacity=0.2, label="White Matter Mesh")
-    
-    # Add the ventricle mesh (blue and semi-transparent)
-    plotter.add_mesh(ventricle_pv, color="blue", opacity=0.6, label="Ventricle Mesh")
+    # Create a new Plotter if not provided
+    if plotter is None:
+        plotter = pv.Plotter()
+        plotter.add_mesh(white_matter_pv, color="lightgray", opacity=0.2, label="White Matter Mesh")
+        plotter.add_mesh(ventricle_pv, color="blue", label="Ventricle Mesh")
+        plotter.add_legend()
+        plotter.show_grid()
+        plotter.camera_position = 'xy'
+        plotter.show(interactive_update=True)  # Enable interactive updates
 
-    # Add legend and display
-    plotter.add_legend()
-    plotter.show()
+    # Update the existing meshes
+    else:
+        plotter.update_coordinates(ventricle_pv.points, render=False)
+        plotter.update_coordinates(white_matter_pv.points, render=False)
+
+    # Render the updated plot
+    plotter.render()
+
+    return plotter  # Return the Plotter for live updates
+
+def save_growth_interactively(ventricle_steps, white_matter, output_filename="ventricle_growth"):
+    """
+    Save the growth process as individual .vtp files for interactive inspection.
+
+    Parameters:
+        - ventricle_steps: List of Trimesh objects representing the ventricle at different stages.
+        - white_matter: Trimesh object for the white matter mesh (remains constant).
+        - output_filename: Directory path to save the ventricle and white matter files.
+    """
+
+    # Ensure the output directory exists
+    os.makedirs(output_filename, exist_ok=True)
+
+    # Save the white matter as a static .vtp file
+    white_matter_pv = pv.PolyData(
+        white_matter.vertices,
+        np.hstack([np.full((len(white_matter.faces), 1), 3), white_matter.faces]).ravel(),
+    )
+    white_matter_path = os.path.join(output_filename, "white_matter.vtp")
+    white_matter_pv.save(white_matter_path)
+    print(f"White matter saved to {white_matter_path}")
+
+    # Save each ventricle step as a .vtp file
+    for i, ventricle in enumerate(ventricle_steps):
+        ventricle_pv = pv.PolyData(
+            ventricle.vertices,
+            np.hstack([np.full((len(ventricle.faces), 1), 3), ventricle.faces]).ravel(),
+        )
+        ventricle_path = os.path.join(output_filename, f"ventricle_step_{i}.vtp")
+        ventricle_pv.save(ventricle_path)
+        print(f"Ventricle step {i} saved to {ventricle_path}")
+
+
 
 def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
     u = np.linspace(0, 2 * np.pi, resolution)
@@ -436,6 +479,11 @@ def expand_ventricle_dynamic_fraction_auto(
     num_stages = len(thresholds)
     fixed_vertices = np.zeros(len(ventricle.vertices), dtype=bool)  # Track fixed vertices
 
+    # PyVista plotter setup
+    plotter = None  # To enable live updates
+    ventricle_steps = []  # For time-series saving
+    output_time_series="ventricle_growth.vtm"
+
     # Create a copy of the white matter mesh for visualization purposes
     initial_ventricle_volume  = ventricle.volume
     white_matter_visualization = white_matter.copy()
@@ -526,14 +574,22 @@ def expand_ventricle_dynamic_fraction_auto(
             # Apply smoothing
             ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.9)
             # Visualize Meshes
-            visualize_with_pyvista(ventricle, white_matter)
+            # visualize_with_pyvista_live(ventricle, white_matter)
 
             # Visualize and save the current state
             visualize_expansion_process(ventricle, white_matter_visualization, step=f"Stage{stage_idx + 1}_Step{step + 1}")
 
+            # Append the current ventricle step for time-series
+            ventricle_steps.append(ventricle.copy())
+
     # After the loop, generate the GIF
     generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
     print("\nAll stages completed.")
+
+    # Save the time-series for interactive review
+    save_growth_interactively(ventricle_steps, white_matter_visualization, output_filename=output_time_series)
+    print(f"\nInteractive time-series saved to {output_time_series}")
+
 
     return ventricle
 
@@ -544,7 +600,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.8, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.6, resolution=200, petal_amplitude=0.3, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -552,7 +608,7 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=30, 
+        steps=2, 
         f_min=0.02, 
         f_max=0.4,
         thresholds=[0.06, 0.03, 0.02],  # Stages with thresholds
