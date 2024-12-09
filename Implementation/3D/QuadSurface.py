@@ -320,7 +320,7 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
     Parameters:
         - ventricle_mesh: Trimesh object for the ventricular mesh.
         - white_matter_mesh: Trimesh object for the white matter boundary.
-        - step: Current step number (can be integer or string like 'Final').
+        - step: Continuous step number (int) or a string like "Final".
         - output_dir: Directory to save visualization images.
     """
     import os
@@ -329,10 +329,10 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
     os.makedirs(output_dir, exist_ok=True)
 
     # Format the step as part of the filename
-    if isinstance(step, int):
+    if isinstance(step, int):  # If step is an integer, zero-pad it
         step_str = f"{step:03d}"
-    else:
-        step_str = str(step)
+    else:  # If step is a string, use it directly
+        step_str = step
 
     # Plot the meshes
     fig = plt.figure(figsize=(10, 8))
@@ -347,8 +347,7 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
         color="blue",
         alpha=0.6,
         edgecolor="gray",
-        linewidth=0.2,
-        label="Ventricular Mesh"
+        linewidth=0.2
     )
 
     # White matter mesh
@@ -360,8 +359,7 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
         color="green",
         alpha=0.1,
         edgecolor="gray",
-        linewidth=0.2,
-        label="White Matter Mesh"
+        linewidth=0.2
     )
 
     # Set plot details
@@ -369,14 +367,12 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
     ax.set_xlabel("X-axis")
     ax.set_ylabel("Y-axis")
     ax.set_zlabel("Z-axis")
-    ax.legend(loc="upper right")
 
     # Save the figure as an image
     output_path = os.path.join(output_dir, f"step_{step_str}.png")
     plt.savefig(output_path, dpi=150)
-    plt.close(fig)  # Close the figure to avoid display
+    plt.close(fig)
     print(f"Visualization saved at {output_path}")
-
 
 
 def generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif"):
@@ -474,20 +470,25 @@ def expand_ventricle_dynamic_fraction_auto(
     Returns:
         - ventricle: Expanded Trimesh object.
     """
+    import os
+
+    # Ensure output directory exists
+    output_dir = "ventricle_obj_files"
+    os.makedirs(output_dir, exist_ok=True)
+
     assert len(thresholds) == len(percentages), "Thresholds and percentages must have the same length."
     
     num_stages = len(thresholds)
     fixed_vertices = np.zeros(len(ventricle.vertices), dtype=bool)  # Track fixed vertices
 
-    # PyVista plotter setup
-    plotter = None  # To enable live updates
-    ventricle_steps = []  # For time-series saving
-    output_time_series="ventricle_growth.vtm"
+    # Continuous step counter
+    step_counter = 1  
+    ventricle_steps = []  # For saving the time-series
+    output_time_series = "ventricle_growth.vtm"
 
-    # Create a copy of the white matter mesh for visualization purposes
-    initial_ventricle_volume  = ventricle.volume
-    white_matter_visualization = white_matter.copy()
-    white_matter_volume = white_matter_visualization.volume
+    # Initial volume information
+    initial_ventricle_volume = ventricle.volume
+    white_matter_volume = white_matter.volume
     initial_ratio = abs(initial_ventricle_volume / white_matter_volume)
 
     print(f"Initial ventricle volume: {ventricle.volume:.4f}")
@@ -497,110 +498,106 @@ def expand_ventricle_dynamic_fraction_auto(
         print(f"\nStarting Stage {stage_idx + 1}/{num_stages} - Threshold: {threshold}, Required Percentage: {percentage * 100}%")
         
         for step in range(steps):
-            # Save current vertices before remeshing
+            # Save current vertices
             previous_vertices = ventricle.vertices.copy()
 
             # Calculate normals and distances
             normals = calculate_corrected_vertex_normals(previous_vertices, ventricle.faces)
-            distances = np.full(len(previous_vertices), np.inf)  # Initialize distances
+            distances = np.full(len(previous_vertices), np.inf)
 
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
                 if fixed_vertices[i]:
-                    continue  # Skip fixed vertices
+                    continue
 
                 locations, _, _ = white_matter.ray.intersects_location(
                     ray_origins=[vertex], ray_directions=[normal]
                 )
                 if locations.size > 0:
                     closest_point = locations[0]
-                    intersection_distance = np.linalg.norm(closest_point - vertex)
-                    distances[i] = intersection_distance  # Record the distance
+                    distances[i] = np.linalg.norm(closest_point - vertex)
 
-            # Dynamically adjust the fraction for movement
+            # Adjust movement fraction dynamically
             current_volume = ventricle.volume
             volume_ratio = abs(current_volume / white_matter_volume)
 
-            if volume_ratio <= 0.8:
-                fraction = f_min + ((f_max - f_min) / (0.8 - initial_ratio)) * (volume_ratio - initial_ratio)
+            if volume_ratio <= 0.85:
+                fraction = f_min + ((f_max - f_min) / (0.85 - initial_ratio)) * (volume_ratio - initial_ratio)
             else:
                 fraction = f_max
             
-            print(f"\nStep {step + 1}: Volume Ratio = {volume_ratio:.4f}, Expansion Fraction = {fraction:.4f}")
+            print(f"Step {step_counter}: Volume Ratio = {volume_ratio:.4f}, Expansion Fraction = {fraction:.4f}")
 
-            # Mark vertices within the threshold as fixed
+            # Mark vertices as fixed if within the threshold
             within_threshold = distances <= threshold
-            fixed_vertices |= within_threshold  # Update fixed vertices
+            fixed_vertices |= within_threshold
 
-            # Calculate the percentage of vertices within the threshold
             current_percentage = np.mean(within_threshold)
-            print(f"Step {step + 1}: {current_percentage * 100:.2f}% of vertices within threshold.")
+            print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold.")
 
             if current_percentage >= percentage:
                 print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
                 break
 
-            # Expand non-fixed vertices
+            # Expand vertices that are not fixed or within threshold
             new_vertices = ventricle.vertices.copy()
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
-                if fixed_vertices[i]:
-                    continue  # Skip fixed vertices
-
-                if distances[i] < np.inf:  # If intersection is found
+                if not fixed_vertices[i] and distances[i] > threshold:
                     move_vector = normal * min(distances[i] * fraction, distances[i])
                     new_vertices[i] = vertex + move_vector
+                else:
+                    new_vertices[i] = vertex  # Keep vertex at the same position if within threshold
 
-            # Update the ventricle mesh
+            # Update ventricle mesh
             ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
             # Remesh using face area
             ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
 
-            # Update fixed_vertices to match the new vertex count
+            # Update fixed vertices for new remeshed vertices
             new_vertex_count = len(ventricle.vertices)
             if len(fixed_vertices) != new_vertex_count:
                 print(f"Updating fixed vertices: Old count = {len(fixed_vertices)}, New count = {new_vertex_count}")
                 new_fixed_vertices = np.zeros(new_vertex_count, dtype=bool)
-
-                # Match fixed vertices to the new vertex array
                 for old_idx, is_fixed in enumerate(fixed_vertices):
                     if is_fixed:
-                        # Find the closest new vertex to the old vertex
                         old_vertex = previous_vertices[old_idx]
                         closest_new_idx = np.argmin(np.linalg.norm(ventricle.vertices - old_vertex, axis=1))
                         new_fixed_vertices[closest_new_idx] = True
-
                 fixed_vertices = new_fixed_vertices
 
             # Apply smoothing
-            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.9)
-            # Visualize Meshes
-            # visualize_with_pyvista_live(ventricle, white_matter)
+            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.4)
 
-            # Visualize and save the current state
-            visualize_expansion_process(ventricle, white_matter_visualization, step=f"Stage{stage_idx + 1}_Step{step + 1}")
+            # Save the current ventricular mesh as an .obj file
+            obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
+            ventricle.export(obj_filename)
+            print(f"Saved: {obj_filename}")
 
-            # Append the current ventricle step for time-series
+            # Save visualization with continuous step numbering
+            visualize_expansion_process(ventricle, white_matter, step=step_counter)
             ventricle_steps.append(ventricle.copy())
 
-    # After the loop, generate the GIF
+            step_counter += 1  # Increment step counter
+
+    # Generate GIF from saved visualizations
     generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
     print("\nAll stages completed.")
 
     # Save the time-series for interactive review
-    save_growth_interactively(ventricle_steps, white_matter_visualization, output_filename=output_time_series)
+    save_growth_interactively(ventricle_steps, white_matter, output_filename=output_time_series)
     print(f"\nInteractive time-series saved to {output_time_series}")
-
 
     return ventricle
 
 
 
+
 # Main function
 if __name__ == "__main__":
-    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=30)
+    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.12, resolution=30)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.6, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.4, resolution=200, petal_amplitude=0.3, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -608,10 +605,10 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=2, 
-        f_min=0.02, 
-        f_max=0.4,
-        thresholds=[0.06, 0.03, 0.02],  # Stages with thresholds
+        steps=30, 
+        f_min=0.15, 
+        f_max=0.3,
+        thresholds=[0.1, 0.05, 0.01],  # Stages with thresholds
         percentages=[0.9, 0.95, 1.0]    # Required percentages
     )
 
