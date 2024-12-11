@@ -76,7 +76,7 @@ with open(json_file_path, 'r') as f:
     vector_data = json.load(f)
 
 # Define grid size
-grid_size = 0.01
+grid_size = 0.07
 
 # Create averaged vector grid
 averaged_vector_grid = create_and_average_vector_grid_3D(vector_data, grid_size)
