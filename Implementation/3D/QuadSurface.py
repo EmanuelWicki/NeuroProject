@@ -1,5 +1,6 @@
 import numpy as np
 import trimesh
+import json
 import os
 from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
@@ -80,6 +81,34 @@ def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, b
     print(f"Saved initial bumpy sphere to {step_filename}")
 
     return mesh
+
+def inward_offset_mesh(mesh, offset_distance):
+    """
+    Create an inward offset of the mesh by moving vertices along their normals.
+
+    Parameters:
+        - mesh: Trimesh object to offset.
+        - offset_distance: Distance to move vertices inward.
+
+    Returns:
+        - offset_mesh: Trimesh object representing the offset mesh.
+    """
+    # Compute vertex normals
+    normals = mesh.vertex_normals
+
+    # Move vertices inward along their normals
+    offset_vertices = mesh.vertices - normals * offset_distance
+
+    # Create a new mesh with the offset vertices
+    offset_mesh = trimesh.Trimesh(vertices=offset_vertices, faces=mesh.faces, process=False)
+
+    # Remove degenerate faces
+    offset_mesh.remove_degenerate_faces()
+    offset_mesh.remove_unreferenced_vertices()
+
+    return offset_mesh
+
+
 
 def trimesh_to_pyvista(mesh):
     """
@@ -173,6 +202,71 @@ def save_growth_interactively(ventricle_steps, white_matter, output_filename="ve
         ventricle_path = os.path.join(output_filename, f"ventricle_step_{i}.vtp")
         ventricle_pv.save(ventricle_path)
         print(f"Ventricle step {i} saved to {ventricle_path}")
+
+
+def export_combined_mesh_with_opacity(ventricle, white_matter, white_matter_offset, output_filename):
+    """
+    Export the ventricle and white matter meshes into a single .obj file.
+    Assign transparency (opacity) to the white matter mesh via a custom .mtl file.
+
+    Parameters:
+        - ventricle: Trimesh object for the ventricle mesh.
+        - white_matter: Trimesh object for the white matter mesh.
+        - output_filename: Path to save the combined .obj file.
+    """
+
+    # Prepare directories and file paths
+    base_filename = os.path.splitext(output_filename)[0]
+    mtl_filename = base_filename + ".mtl"
+    obj_filename = output_filename
+
+    # Material names
+    ventricle_material = "ventricle_material"
+    white_matter_material = "white_matter_material"
+    white_matter_offset_material = "white_matter_offset_material"
+
+    # Write the .mtl file explicitly
+    with open(mtl_filename, "w") as mtl_file:
+        mtl_file.write(f"newmtl {ventricle_material}\n")
+        mtl_file.write("Kd 1.0 0.0 0.0\n")  # Red color
+        mtl_file.write("d 1.0\n")  # Fully opaque\n\n")
+
+        mtl_file.write(f"newmtl {white_matter_material}\n")
+        mtl_file.write("Kd 0.9 0.9 0.9\n")  # Light gray color
+        mtl_file.write("d 0.2\n")  # 20% opacity
+
+        mtl_file.write(f"newmtl {white_matter_offset_material}\n")
+        mtl_file.write("Kd 0.9 0.9 0.9\n")  # Red color
+        mtl_file.write("d 0.25\n")  # Fully opaque\n\n")
+
+    # Combine meshes into a single .obj file
+    with open(obj_filename, "w") as obj_file:
+        obj_file.write(f"mtllib {os.path.basename(mtl_filename)}\n")
+
+        # Ventricle Mesh
+        obj_file.write(f"usemtl {ventricle_material}\n")
+        for vertex in ventricle.vertices:
+            obj_file.write(f"v {vertex[0]} {vertex[1]} {vertex[2]}\n")
+        for face in ventricle.faces:
+            obj_file.write(f"f {face[0] + 1} {face[1] + 1} {face[2] + 1}\n")
+
+        # White Matter Mesh
+        obj_file.write(f"usemtl {white_matter_material}\n")
+        offset = len(ventricle.vertices)  # Offset for vertex indexing
+        for vertex in white_matter.vertices:
+            obj_file.write(f"v {vertex[0]} {vertex[1]} {vertex[2]}\n")
+        for face in white_matter.faces:
+            obj_file.write(f"f {face[0] + 1 + offset} {face[1] + 1 + offset} {face[2] + 1 + offset}\n")
+
+        # White Matter Mesh
+        obj_file.write(f"usemtl {white_matter_offset_material}\n")
+        offset = len(ventricle.vertices)  # Offset for vertex indexing
+        for vertex in white_matter_offset.vertices:
+            obj_file.write(f"v {vertex[0]} {vertex[1]} {vertex[2]}\n")
+        for face in white_matter_offset.faces:
+            obj_file.write(f"f {face[0] + 1 + offset} {face[1] + 1 + offset} {face[2] + 1 + offset}\n")
+
+    print(f"Saved combined mesh with white matter opacity: {obj_filename}")
 
 
 
@@ -323,7 +417,6 @@ def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_
         - step: Continuous step number (int) or a string like "Final".
         - output_dir: Directory to save visualization images.
     """
-    import os
 
     # Create the output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -456,12 +549,12 @@ def expand_ventricle_dynamic_fraction_auto(
 ):
     """
     Expand the ventricle mesh dynamically in stages, ensuring vertices do not cross
-    the white matter boundary.
+    the white matter boundary. An inward offset mesh prevents overshooting.
 
     Parameters:
         - ventricle: Trimesh object representing the ventricle.
         - white_matter: Trimesh object representing the white matter.
-        - steps: Number of expansion steps.
+        - steps: Number of expansion steps per stage.
         - f_min: Minimum fraction for expansion.
         - f_max: Maximum fraction for expansion.
         - thresholds: List of distances for each stage.
@@ -470,108 +563,102 @@ def expand_ventricle_dynamic_fraction_auto(
     Returns:
         - ventricle: Expanded Trimesh object.
     """
-    import os
 
     # Ensure output directory exists
     output_dir = "ventricle_obj_files"
     os.makedirs(output_dir, exist_ok=True)
+    json_output_file = "expansion_vectors.json" 
 
-    assert len(thresholds) == len(percentages), "Thresholds and percentages must have the same length."
-    
-    num_stages = len(thresholds)
-    fixed_vertices = np.zeros(len(ventricle.vertices), dtype=bool)  # Track fixed vertices
-
-    # Continuous step counter
-    step_counter = 1  
-    ventricle_steps = []  # For saving the time-series
-    output_time_series = "ventricle_growth.vtm"
-
-    # Initial volume information
-    initial_ventricle_volume = ventricle.volume
-    white_matter_volume = white_matter.volume
-    initial_ratio = abs(initial_ventricle_volume / white_matter_volume)
+    step_counter = 1
+    ventricle_steps = []
+    expansion_data = []  # To store all expansion vectors and positions
 
     print(f"Initial ventricle volume: {ventricle.volume:.4f}")
     print(f"White matter volume: {white_matter.volume:.4f}")
 
     for stage_idx, (threshold, percentage) in enumerate(zip(thresholds, percentages)):
-        print(f"\nStarting Stage {stage_idx + 1}/{num_stages} - Threshold: {threshold}, Required Percentage: {percentage * 100}%")
-        
+        print(f"\nStarting Stage {stage_idx + 1}/{len(thresholds)} - Threshold: {threshold}, Required: {percentage * 100:.2f}%")
+
+        # Create inward offset of the white matter mesh
+        offset_white_matter = inward_offset_mesh(white_matter, threshold)
+        print(f"Offset white matter mesh created with threshold: {threshold}")
+
         for step in range(steps):
-            # Save current vertices
             previous_vertices = ventricle.vertices.copy()
-
-            # Calculate normals and distances
             normals = calculate_corrected_vertex_normals(previous_vertices, ventricle.faces)
+
+            new_vertices = previous_vertices.copy()
+            step_vectors = []
+
+            # Measure distances to the original white matter surface
             distances = np.full(len(previous_vertices), np.inf)
-
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
-                if fixed_vertices[i]:
-                    continue
+                if np.any(np.isnan(normal)) or np.linalg.norm(normal) == 0:
+                    continue  # Skip invalid normals
 
+                # Calculate intersection with the white matter
                 locations, _, _ = white_matter.ray.intersects_location(
                     ray_origins=[vertex], ray_directions=[normal]
                 )
                 if locations.size > 0:
-                    closest_point = locations[0]
-                    distances[i] = np.linalg.norm(closest_point - vertex)
+                    distances[i] = np.linalg.norm(locations[0] - vertex)
+
+            # Identify vertices inside the no-movement zone
+            vertices_in_offset = []
+            for i, vertex in enumerate(previous_vertices):
+                closest_point, _, _ = offset_white_matter.nearest.on_surface([vertex])
+                if np.linalg.norm(closest_point - vertex) <= threshold:
+                    vertices_in_offset.append(i)  # Track vertices in the offset zone
 
             # Adjust movement fraction dynamically
             current_volume = ventricle.volume
-            volume_ratio = abs(current_volume / white_matter_volume)
+            volume_ratio = abs(current_volume / white_matter.volume)
 
             if volume_ratio <= 0.85:
-                fraction = f_min + ((f_max - f_min) / (0.85 - initial_ratio)) * (volume_ratio - initial_ratio)
+                fraction = f_min + ((f_max - f_min) / (0.85 - 0.01)) * (volume_ratio - 0.01)
             else:
                 fraction = f_max
-            
+
             print(f"Step {step_counter}: Volume Ratio = {volume_ratio:.4f}, Expansion Fraction = {fraction:.4f}")
 
-            # Mark vertices as fixed if within the threshold
-            within_threshold = distances <= threshold
-            fixed_vertices |= within_threshold
-
-            current_percentage = np.mean(within_threshold)
+            # Calculate percentage of vertices within the threshold
+            current_percentage = len(vertices_in_offset) / len(previous_vertices)
             print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold.")
 
             if current_percentage >= percentage:
                 print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
                 break
 
-            # Expand vertices that are not fixed or within threshold
-            new_vertices = ventricle.vertices.copy()
+            # Expand vertices: Only move vertices outside the offset zone
+            new_vertices = previous_vertices.copy()
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
-                if not fixed_vertices[i] and distances[i] > threshold:
+                if i not in vertices_in_offset and distances[i] < np.inf:
                     move_vector = normal * min(distances[i] * fraction, distances[i])
                     new_vertices[i] = vertex + move_vector
-                else:
-                    new_vertices[i] = vertex  # Keep vertex at the same position if within threshold
 
+                    # Store position and expansion vector
+                    step_vectors.append({
+                        "position": vertex.tolist(),
+                        "vector": move_vector.tolist()
+                    })
+                else:
+                    new_vertices[i] = vertex  # Keep vertex unchanged if within offset
+
+            # Append step_vectors for the current step to expansion_data
+            expansion_data.append({
+                "step": step_counter,
+                "vectors": step_vectors
+            })
             # Update ventricle mesh
             ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
-            # Remesh using face area
+            # Remesh and smooth
             ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
+            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.6)
 
-            # Update fixed vertices for new remeshed vertices
-            new_vertex_count = len(ventricle.vertices)
-            if len(fixed_vertices) != new_vertex_count:
-                print(f"Updating fixed vertices: Old count = {len(fixed_vertices)}, New count = {new_vertex_count}")
-                new_fixed_vertices = np.zeros(new_vertex_count, dtype=bool)
-                for old_idx, is_fixed in enumerate(fixed_vertices):
-                    if is_fixed:
-                        old_vertex = previous_vertices[old_idx]
-                        closest_new_idx = np.argmin(np.linalg.norm(ventricle.vertices - old_vertex, axis=1))
-                        new_fixed_vertices[closest_new_idx] = True
-                fixed_vertices = new_fixed_vertices
-
-            # Apply smoothing
-            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.4)
-
-            # Save the current ventricular mesh as an .obj file
+            # Save the combined ventricular and white matter meshes
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
-            ventricle.export(obj_filename)
-            print(f"Saved: {obj_filename}")
+            export_combined_mesh_with_opacity(ventricle, white_matter, white_matter, obj_filename)
 
             # Save visualization with continuous step numbering
             visualize_expansion_process(ventricle, white_matter, step=step_counter)
@@ -583,9 +670,10 @@ def expand_ventricle_dynamic_fraction_auto(
     generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
     print("\nAll stages completed.")
 
-    # Save the time-series for interactive review
-    save_growth_interactively(ventricle_steps, white_matter, output_filename=output_time_series)
-    print(f"\nInteractive time-series saved to {output_time_series}")
+    # Save expansion data to JSON
+    with open(json_output_file, "w") as json_file:
+        json.dump(expansion_data, json_file, indent=4)
+    print(f"Expansion vectors saved to {json_output_file}")
 
     return ventricle
 
@@ -594,10 +682,10 @@ def expand_ventricle_dynamic_fraction_auto(
 
 # Main function
 if __name__ == "__main__":
-    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.12, resolution=30)
+    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.4, resolution=200, petal_amplitude=0.3, petal_frequency=3)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.5, resolution=200, petal_amplitude=0.2, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -605,12 +693,13 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=30, 
+        steps=1, 
         f_min=0.15, 
-        f_max=0.3,
-        thresholds=[0.1, 0.05, 0.01],  # Stages with thresholds
-        percentages=[0.9, 0.95, 1.0]    # Required percentages
-    )
+        f_max=0.25,
+        # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
+        thresholds=[0.05],
+        percentages=[0.7, 0.8, 0.95]    # Required percentages
+        )
 
     print("\nFinal Expanded Ventricle Mesh:")
     print(f"Vertex count: {len(expanded_ventricle.vertices)}")
