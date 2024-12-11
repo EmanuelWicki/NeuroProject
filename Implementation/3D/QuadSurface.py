@@ -693,7 +693,7 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=1, 
+        steps=40, 
         f_min=0.15, 
         f_max=0.25,
         # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
