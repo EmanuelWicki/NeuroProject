@@ -7,6 +7,14 @@ import os
 import json
 import math
 
+
+#####################################################################################################################################
+##################  This Script expands the ventricular surfcae towards the white matter surface ####################################  
+##################  Stores Expansion Gif and PDF as well as JSON File with all expansion vectors ####################################  
+#####################################################################################################################################
+
+
+
 # Function to create an irregular shape (ventricle-like) with more points for smoother calculations
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 200)

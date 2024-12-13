@@ -3,6 +3,12 @@ import matplotlib.pyplot as plt
 import json
 from scipy.spatial.distance import cdist
 
+
+#####################################################################################################################################
+##################  This Script takes JSON file of expansion vector as input and generates a inversed vectorfield  ##################
+##################  Inverse Vector Field to guide paths from the white matter to the ventricle (they grow the other way around ######
+#####################################################################################################################################
+
 # Function to generate the ventricular shape
 def generate_ventricle_shape():
     t = np.linspace(0, 2 * np.pi, 2000)
