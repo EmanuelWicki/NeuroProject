@@ -479,12 +479,11 @@ def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.2):
 
     return trimesh.Trimesh(vertices=vertices, faces=mesh.faces)
 
-def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_normals, 
-                                 alpha=0.7, beta=0.3, gamma=0.5, lambda_smooth=0.5, 
-                                 iterations=3, threshold=0.01):
+def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_normals,
+                                 alpha=0.7, beta=0.3, gamma=0.5, lambda_smooth=0.5, iterations=3, skip_vertices=None):
     """
-    Adaptive Laplacian smoothing with curvature, distance, directional weights,
-    and threshold enforcement to prevent vertices from overshooting.
+    Adaptive Laplacian smoothing with curvature, distance, and alignment weights.
+    Skips vertices that are within the threshold zones.
 
     Parameters:
         - vertices: Vertex positions of the mesh (Nx3 array).
@@ -496,7 +495,7 @@ def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_
         - gamma: Weight for directional alignment.
         - lambda_smooth: Smoothing factor for Laplacian smoothing.
         - iterations: Number of smoothing iterations.
-        - threshold: Maximum allowable distance from the white matter surface.
+        - skip_vertices: Indices of vertices to skip during smoothing.
 
     Returns:
         - Smoothed vertices (Nx3 array).
@@ -514,26 +513,16 @@ def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_
         curvature /= curvature.max() + 1e-8
         return curvature
 
-    def compute_smoothing_weights(curvature, distances, vertices, white_matter_mean):
-        expansion_direction = white_matter_mean - vertices.mean(axis=0)
-        expansion_direction /= np.linalg.norm(expansion_direction)
-        vertex_directions = vertices - vertices.mean(axis=0)
-        vertex_directions /= np.linalg.norm(vertex_directions, axis=1)[:, np.newaxis]
-        directional_weight = np.abs(np.dot(vertex_directions, expansion_direction))
-
-        return alpha * curvature + beta * (1 - distances) + gamma * directional_weight
-
     white_matter_mean = white_matter_vertices.mean(axis=0)
+
     for _ in range(iterations):
-        # Step 1: Compute curvature and distances
+        # Compute weights
         curvature = compute_curvature(vertices, faces, vertex_normals)
         distances, _ = kdtree.query(vertices)
-        distances /= distances.max() + 1e-8
+        normalized_distances = distances / (distances.max() + 1e-8)
+        weights = alpha * curvature + beta * (1 - normalized_distances) + gamma
 
-        # Step 2: Compute smoothing weights
-        weights = compute_smoothing_weights(curvature, distances, vertices, white_matter_mean)
-
-        # Step 3: Laplacian smoothing
+        # Laplacian smoothing
         vertex_neighbors = {i: [] for i in range(len(vertices))}
         for face in faces:
             for v in face:
@@ -541,23 +530,44 @@ def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_
 
         new_vertices = vertices.copy()
         for i, neighbors in vertex_neighbors.items():
+            if skip_vertices is not None and i in skip_vertices:
+                continue  # Skip vertices that are within the threshold zones
+
             neighbors = list(set(neighbors))
             avg_position = np.mean(vertices[neighbors], axis=0)
             new_vertices[i] += weights[i] * lambda_smooth * (avg_position - vertices[i])
-
-        # Step 4: Prevent vertices from overshooting
-        distances, indices = kdtree.query(new_vertices)
-        for i, distance in enumerate(distances):
-            if distance > threshold:
-                direction = white_matter_vertices[indices[i]] - new_vertices[i]
-                direction /= np.linalg.norm(direction) + 1e-8
-                new_vertices[i] = new_vertices[i] + direction * (distance - threshold)
 
         vertices = new_vertices
 
     return vertices
 
+def enforce_boundary(vertices, white_matter_vertices, threshold=0.01):
+    """
+    Prevent vertices from overshooting the white matter boundary.
 
+    Parameters:
+        - vertices: Current mesh vertices (Nx3 array).
+        - white_matter_vertices: White matter surface vertices (Px3 array).
+        - threshold: Maximum allowable distance from the white matter surface.
+
+    Returns:
+        - Corrected vertices (Nx3 array).
+    """
+    from scipy.spatial import cKDTree
+
+    kdtree = cKDTree(white_matter_vertices)
+    distances, indices = kdtree.query(vertices)  # Find nearest points on white matter
+
+    corrected_vertices = vertices.copy()
+    for i, distance in enumerate(distances):
+        if distance <= threshold:
+            # Calculate direction back to the boundary
+            direction = white_matter_vertices[indices[i]] - vertices[i]
+            direction /= np.linalg.norm(direction) + 1e-8  # Normalize direction
+            # Adjust vertex position to sit exactly on the boundary
+            corrected_vertices[i] = white_matter_vertices[indices[i]]
+
+    return corrected_vertices
 
 # Visualize the expansion process
 def visualize_expansion_process(ventricle_mesh, white_matter_mesh, step, output_dir="visualization_steps"):
@@ -789,8 +799,17 @@ def expand_ventricle_dynamic_fraction_auto(
                 faces=ventricle.faces,
                 white_matter_vertices=white_matter.vertices,
                 vertex_normals=updated_normals,
-                alpha=0.2, beta=0.2, gamma=0.2, lambda_smooth=0.2, iterations=1, threshold=0.01
+                alpha=0.6, beta=0.3, gamma=0.3, lambda_smooth=0.6, iterations=4,
+                skip_vertices=vertices_in_offset  # Skip vertices in the threshold zones
             )
+            # Step 4: Correct any vertices overshooting the white matter boundary
+            '''
+            ventricle.vertices = enforce_boundary(
+                vertices=ventricle.vertices,
+                white_matter_vertices=white_matter.vertices,
+                threshold=0.005  # Allowable boundary threshold
+            )
+            '''
 
             # Save the current step
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
@@ -827,7 +846,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.6, outer_radius=1, num_points=5, extrusion=2)
+    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.3, outer_radius=0.6, num_points=8, extrusion=0.6)
     # white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.7, resolution=200, petal_amplitude=0.2, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
@@ -836,12 +855,12 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=40, 
-        f_min=0.15, 
-        f_max=0.25,
+        steps=20, 
+        f_min=0.2, 
+        f_max=0.35,
         # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
-        thresholds=[0.1, 0.05, 0.001],
-        percentages=[0.35, 0.65, 0.95]    # Required percentages
+        thresholds=[0.05, 0.02, 0.01],
+        percentages=[0.35, 0.6, 0.95]    # Required percentages
         )
 
     print("\nFinal Expanded Ventricle Mesh:")
