@@ -5,6 +5,7 @@ import os
 from scipy.spatial import Delaunay
 import matplotlib.pyplot as plt
 from pymeshfix import MeshFix
+from scipy.spatial import cKDTree
 from trimesh.remesh import subdivide
 from PIL import Image
 import pyvista as pv
@@ -28,6 +29,24 @@ def FixMesh(mesh, enforce_convexity=False):
     mesh = laplacian_smoothing(mesh, iterations=5, lambda_factor=0.9)
 
     return mesh
+
+def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
+    u = np.linspace(0, 2 * np.pi, resolution)
+    v = np.linspace(0, np.pi, resolution)
+    u, v = np.meshgrid(u, v)
+
+    r = radius + petal_amplitude * np.sin(petal_frequency * v) * np.sin(petal_frequency * u)
+
+    x = center[0] + r * np.sin(v) * np.cos(u)
+    y = center[1] + r * np.sin(v) * np.sin(u)
+    z = center[2] + r * np.cos(v)
+
+    vertices = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
+    points2D = np.vstack((u.flatten(), v.flatten())).T
+    delaunay = Delaunay(points2D)
+    faces = delaunay.simplices
+
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
 
 # Generate a bumpy sphere mesh
 def generate_bumpy_sphere(center, radius, resolution=50, bump_amplitude=0.001, bump_frequency=2, output_dir="ventricle_steps"):
@@ -460,75 +479,84 @@ def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.2):
 
     return trimesh.Trimesh(vertices=vertices, faces=mesh.faces)
 
-def adaptive_laplacian_smoothing(mesh, white_matter, proximity_threshold=0.02, smooth_factor_min=0.1, smooth_factor_max=0.6, iterations=3):
+def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_normals, 
+                                 alpha=0.7, beta=0.3, gamma=0.5, lambda_smooth=0.5, 
+                                 iterations=3, threshold=0.01):
     """
-    Adaptive Laplacian smoothing based on proximity and intersection point normals.
+    Adaptive Laplacian smoothing with curvature, distance, directional weights,
+    and threshold enforcement to prevent vertices from overshooting.
 
     Parameters:
-        - mesh: Trimesh object (ventricle mesh) to smooth.
-        - white_matter: Trimesh object (white matter surface).
-        - proximity_threshold: Distance threshold to adjust smoothing.
-        - smooth_factor_min: Minimum smoothing factor for concave regions.
-        - smooth_factor_max: Maximum smoothing factor for convex regions.
+        - vertices: Vertex positions of the mesh (Nx3 array).
+        - faces: Face indices of the mesh (Mx3 array).
+        - white_matter_vertices: White matter mesh vertices (Px3 array).
+        - vertex_normals: Precomputed vertex normals (Nx3 array).
+        - alpha: Weight for curvature contribution.
+        - beta: Weight for distance contribution.
+        - gamma: Weight for directional alignment.
+        - lambda_smooth: Smoothing factor for Laplacian smoothing.
         - iterations: Number of smoothing iterations.
+        - threshold: Maximum allowable distance from the white matter surface.
 
     Returns:
-        - smoothed_mesh: Trimesh object with adaptively smoothed vertices.
+        - Smoothed vertices (Nx3 array).
     """
-    vertices = mesh.vertices.copy()
-    edges = mesh.edges_unique
-    adjacency = {i: [] for i in range(len(vertices))}
-    for edge in edges:
-        adjacency[edge[0]].append(edge[1])
-        adjacency[edge[1]].append(edge[0])
+    kdtree = cKDTree(white_matter_vertices)
 
-    # Step 1: Compute proximity and intersection normals
-    ray_origins = vertices
-    ray_directions = mesh.vertex_normals  # Use ventricle normals as ray directions
+    def compute_curvature(vertices, faces, normals):
+        curvature = np.zeros(len(vertices))
+        for face in faces:
+            v1, v2, v3 = vertices[face]
+            n1, n2, n3 = normals[face]
+            curvature[face] += np.abs(np.dot(n2 - n1, v3 - v1) +
+                                      np.dot(n3 - n2, v1 - v2) +
+                                      np.dot(n1 - n3, v2 - v3))
+        curvature /= curvature.max() + 1e-8
+        return curvature
 
-    # Find intersection points on the white matter surface
-    locations, index_ray, index_tri = white_matter.ray.intersects_location(ray_origins=ray_origins, ray_directions=ray_directions)
-    nearest_points = np.full((len(vertices), 3), np.nan)  # Initialize intersection points
-    nearest_normals = np.full((len(vertices), 3), np.nan)  # Initialize intersection normals
+    def compute_smoothing_weights(curvature, distances, vertices, white_matter_mean):
+        expansion_direction = white_matter_mean - vertices.mean(axis=0)
+        expansion_direction /= np.linalg.norm(expansion_direction)
+        vertex_directions = vertices - vertices.mean(axis=0)
+        vertex_directions /= np.linalg.norm(vertex_directions, axis=1)[:, np.newaxis]
+        directional_weight = np.abs(np.dot(vertex_directions, expansion_direction))
 
-    for i, idx in enumerate(index_ray):
-        nearest_points[idx] = locations[i]
-        nearest_normals[idx] = white_matter.face_normals[index_tri[i]]
+        return alpha * curvature + beta * (1 - distances) + gamma * directional_weight
 
-    # Replace NaN values with defaults
-    nearest_points = np.nan_to_num(nearest_points, nan=0.0)
-    nearest_normals = np.nan_to_num(nearest_normals, nan=0.0)
-
-    # Compute Euclidean distances
-    distances = np.linalg.norm(vertices - nearest_points, axis=1)
-
-    # Step 2: Dot product between vertex normals and intersection normals
-    alignment = np.einsum('ij,ij->i', mesh.vertex_normals, nearest_normals)
-
+    white_matter_mean = white_matter_vertices.mean(axis=0)
     for _ in range(iterations):
+        # Step 1: Compute curvature and distances
+        curvature = compute_curvature(vertices, faces, vertex_normals)
+        distances, _ = kdtree.query(vertices)
+        distances /= distances.max() + 1e-8
+
+        # Step 2: Compute smoothing weights
+        weights = compute_smoothing_weights(curvature, distances, vertices, white_matter_mean)
+
+        # Step 3: Laplacian smoothing
+        vertex_neighbors = {i: [] for i in range(len(vertices))}
+        for face in faces:
+            for v in face:
+                vertex_neighbors[v].extend([u for u in face if u != v])
+
         new_vertices = vertices.copy()
-        for vertex_index, neighbors in adjacency.items():
-            if not neighbors:
-                continue
+        for i, neighbors in vertex_neighbors.items():
+            neighbors = list(set(neighbors))
+            avg_position = np.mean(vertices[neighbors], axis=0)
+            new_vertices[i] += weights[i] * lambda_smooth * (avg_position - vertices[i])
 
-            neighbor_positions = vertices[neighbors]
-            centroid = neighbor_positions.mean(axis=0)
-
-            # Adaptive smoothing factor
-            distance = distances[vertex_index]
-            if distance < proximity_threshold and alignment[vertex_index] < 0:
-                lambda_factor = smooth_factor_min  # Concave area -> less smoothing
-            else:
-                lambda_factor = smooth_factor_max  # Convex area -> more smoothing
-
-            # Update vertex position
-            new_vertices[vertex_index] = (1 - lambda_factor) * vertices[vertex_index] + lambda_factor * centroid
+        # Step 4: Prevent vertices from overshooting
+        distances, indices = kdtree.query(new_vertices)
+        for i, distance in enumerate(distances):
+            if distance > threshold:
+                direction = white_matter_vertices[indices[i]] - new_vertices[i]
+                direction /= np.linalg.norm(direction) + 1e-8
+                new_vertices[i] = new_vertices[i] + direction * (distance - threshold)
 
         vertices = new_vertices
 
-    smoothed_mesh = trimesh.Trimesh(vertices=vertices, faces=mesh.faces, process=False)
-    print("Adaptive Laplacian smoothing with intersection normals applied.")
-    return smoothed_mesh
+    return vertices
+
 
 
 # Visualize the expansion process
@@ -669,42 +697,38 @@ def expand_ventricle_dynamic_fraction_auto(
     steps=40,
     f_min=0.01,
     f_max=0.4,
-    thresholds=[0.01, 0.02, 0.03],  # Threshold distances
-    percentages=[0.9, 0.95, 1.0]    # Percentage of vertices required within each threshold
+    thresholds=[0.01, 0.02, 0.03],
+    percentages=[0.9, 0.95, 1.0]
 ):
     """
     Expand the ventricle mesh dynamically in stages, ensuring vertices do not cross
-    the white matter boundary. An inward offset mesh prevents overshooting.
+    the white matter boundary. Adaptive Laplacian smoothing improves mesh quality.
 
     Parameters:
-        - ventricle: Trimesh object representing the ventricle.
-        - white_matter: Trimesh object representing the white matter.
+        - ventricle: Trimesh object for the ventricle.
+        - white_matter: Trimesh object for the white matter mesh.
         - steps: Number of expansion steps per stage.
-        - f_min: Minimum fraction for expansion.
-        - f_max: Maximum fraction for expansion.
-        - thresholds: List of distances for each stage.
-        - percentages: List of percentages of vertices required within each threshold.
+        - f_min: Minimum expansion fraction.
+        - f_max: Maximum expansion fraction.
+        - thresholds: Distance thresholds for stages.
+        - percentages: Percentage of vertices required within thresholds.
 
     Returns:
-        - ventricle: Expanded Trimesh object.
+        - ventricle: Expanded and adaptively smoothed Trimesh object.
     """
-
-    # Ensure output directory exists
     output_dir = "ventricle_obj_files"
     os.makedirs(output_dir, exist_ok=True)
-    json_output_file = "expansion_vectors.json" 
+    json_output_file = "expansion_vectors.json"
 
     step_counter = 1
+    expansion_data = []  # Store all expansion vectors and positions
     ventricle_steps = []
-    expansion_data = []  # To store all expansion vectors and positions
 
     print(f"Initial ventricle volume: {ventricle.volume:.4f}")
     print(f"White matter volume: {white_matter.volume:.4f}")
 
     for stage_idx, (threshold, percentage) in enumerate(zip(thresholds, percentages)):
-        print(f"\nStarting Stage {stage_idx + 1}/{len(thresholds)} - Threshold: {threshold}, Required: {percentage * 100:.2f}%")
-
-        # Create inward offset of the white matter mesh
+        print(f"\nStarting Stage {stage_idx + 1} - Threshold: {threshold}, Required: {percentage * 100:.2f}%")
         offset_white_matter = inward_offset_mesh(white_matter, threshold)
         print(f"Offset white matter mesh created with threshold: {threshold}")
 
@@ -715,13 +739,9 @@ def expand_ventricle_dynamic_fraction_auto(
             new_vertices = previous_vertices.copy()
             step_vectors = []
 
-            # Measure distances to the original white matter surface
+            # Measure distances to the white matter surface
             distances = np.full(len(previous_vertices), np.inf)
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
-                if np.any(np.isnan(normal)) or np.linalg.norm(normal) == 0:
-                    continue  # Skip invalid normals
-
-                # Calculate intersection with the white matter
                 locations, _, _ = white_matter.ray.intersects_location(
                     ray_origins=[vertex], ray_directions=[normal]
                 )
@@ -733,76 +753,62 @@ def expand_ventricle_dynamic_fraction_auto(
             for i, vertex in enumerate(previous_vertices):
                 closest_point, _, _ = offset_white_matter.nearest.on_surface([vertex])
                 if np.linalg.norm(closest_point - vertex) <= threshold:
-                    vertices_in_offset.append(i)  # Track vertices in the offset zone
+                    vertices_in_offset.append(i)
 
-            # Adjust movement fraction dynamically
+            # Adjust expansion fraction dynamically
             current_volume = ventricle.volume
             volume_ratio = abs(current_volume / white_matter.volume)
+            fraction = f_min + (f_max - f_min) * min(1, (volume_ratio - 0.01) / 0.84)
 
-            if volume_ratio <= 0.85:
-                fraction = f_min + ((f_max - f_min) / (0.85 - 0.01)) * (volume_ratio - 0.01)
-            else:
-                fraction = f_max
-
-            print(f"Step {step_counter}: Volume Ratio = {volume_ratio:.4f}, Expansion Fraction = {fraction:.4f}")
-
-            # Calculate percentage of vertices within the threshold
-            current_percentage = len(vertices_in_offset) / len(previous_vertices)
-            print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold.")
-
-            if current_percentage >= percentage:
-                print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
-                break
-
-            # Expand vertices: Only move vertices outside the offset zone
-            new_vertices = previous_vertices.copy()
+            # Expand vertices
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
                 if i not in vertices_in_offset and distances[i] < np.inf:
                     move_vector = normal * min(distances[i] * fraction, distances[i])
                     new_vertices[i] = vertex + move_vector
-
-                    # Store position and expansion vector
                     step_vectors.append({
                         "position": vertex.tolist(),
                         "vector": move_vector.tolist()
                     })
-                else:
-                    new_vertices[i] = vertex  # Keep vertex unchanged if within offset
 
-            # Append step_vectors for the current step to expansion_data
+            # Update ventricle mesh
+            ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
+
+            # Store expansion data
             expansion_data.append({
                 "step": step_counter,
                 "vectors": step_vectors
             })
-            # Update ventricle mesh
-            ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
-            # Remesh and smooth
+            # Remesh to constant face area
             ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
-            # ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.2)
-            
-            ############################################################################
-            ############### ADAPTIVE LAPLACIAN SMOOTHING ###############################
-            ############################################################################
-            ventricle = adaptive_laplacian_smoothing(
-                ventricle, white_matter,
-                proximity_threshold=0.02,  # Adjust based on desired precision
-                smooth_factor_min=0.1,     # Minimum smoothing factor for concave areas
-                smooth_factor_max=0.6,     # Maximum smoothing factor for convex areas
-                iterations=3
+
+            # Recalculate normals and apply adaptive smoothing
+            updated_normals = calculate_corrected_vertex_normals(ventricle.vertices, ventricle.faces)
+            ventricle.vertices = adaptive_laplacian_smoothing(
+                vertices=ventricle.vertices,
+                faces=ventricle.faces,
+                white_matter_vertices=white_matter.vertices,
+                vertex_normals=updated_normals,
+                alpha=0.2, beta=0.2, gamma=0.2, lambda_smooth=0.2, iterations=1, threshold=0.01
             )
 
-            # Save the combined ventricular and white matter meshes
+            # Save the current step
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
             export_combined_mesh_with_opacity(ventricle, white_matter, white_matter, obj_filename)
-
-            # Save visualization with continuous step numbering
             visualize_expansion_process(ventricle, white_matter, step=step_counter)
             ventricle_steps.append(ventricle.copy())
 
-            step_counter += 1  # Increment step counter
+            print(f"Step {step_counter}: Expansion and smoothing completed.")
+            step_counter += 1
 
-    # Generate GIF from saved visualizations
+            # Check if enough vertices are within the threshold
+            current_percentage = len(vertices_in_offset) / len(previous_vertices)
+            print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold.")
+            if current_percentage >= percentage:
+                print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
+                break
+
+    # Generate a visualization GIF
     generate_growth_gif(output_dir="visualization_steps", gif_name="growth_animation.gif")
     print("\nAll stages completed.")
 
@@ -821,7 +827,8 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.5, outer_radius=1, num_points=5, extrusion=0.6)
+    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.6, outer_radius=1, num_points=5, extrusion=2)
+    # white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.7, resolution=200, petal_amplitude=0.2, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
