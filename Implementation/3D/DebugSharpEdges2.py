@@ -7,6 +7,7 @@ from scipy.spatial import cKDTree
 import matplotlib.pyplot as plt
 from pymeshfix import MeshFix
 from trimesh.remesh import subdivide
+from trimesh.proximity import closest_point
 from PIL import Image
 import pyvista as pv
 
@@ -606,37 +607,38 @@ def refine_mesh_patchwise_with_distance(mesh, white_matter, distance_threshold=0
     Returns:
         - refined_mesh: Trimesh object with locally refined resolution.
     """
-    from scipy.spatial import cKDTree
-    from trimesh.proximity import closest_point
 
     vertices = mesh.vertices
-    tree = cKDTree(vertices)
+    tree = cKDTree(vertices)  # KDTree for efficient neighbor search
 
-    # Compute distances to the white matter mesh
-    distances, _ = closest_point(white_matter, vertices)
-    
+    # Step 1: Compute distances using KDTree
+    print("Building KDTree for white matter mesh...")
+    white_matter_tree = cKDTree(white_matter.vertices)
+    distances, _ = white_matter_tree.query(vertices)  # Distances from mesh vertices to white matter
+    print(f"Number of distances: {len(distances)}, Number of vertices: {len(vertices)}")
+    print(f"Sample distances: {distances[:5]}")
+
     for iteration in range(max_iterations):
         print(f"\nPatchwise refinement iteration {iteration + 1}")
         
-        # Calculate mean curvature at each vertex (approximation)
         vertex_normals = mesh.vertex_normals
         mean_curvatures = np.zeros(len(vertices))
 
+        # Step 2: Compute mean curvature for each vertex
         for i, vertex in enumerate(vertices):
-            if distances[i] > distance_threshold:  # Skip vertices outside the threshold
+            if distances[i] > distance_threshold:  # Skip vertices far from the white matter mesh
                 continue
 
             # Find neighbors within the specified radius
             neighbors = tree.query_ball_point(vertex, radius)
             if len(neighbors) > 1:
-                # Compute curvature as angular deviation of normals
                 normal_diffs = [
                     np.dot(vertex_normals[i], vertex_normals[j])
                     for j in neighbors if i != j
                 ]
                 mean_curvatures[i] = np.mean(np.arccos(np.clip(normal_diffs, -1.0, 1.0)))
 
-        # Identify vertices with high curvature and within the distance threshold
+        # Step 3: Identify vertices for refinement
         high_curvature_vertices = np.where(
             (mean_curvatures > curvature_threshold) & (distances <= distance_threshold)
         )[0]
@@ -647,23 +649,41 @@ def refine_mesh_patchwise_with_distance(mesh, white_matter, distance_threshold=0
 
         print(f"Found {len(high_curvature_vertices)} high-curvature vertices near white matter.")
 
-        # Identify faces containing high-curvature vertices
+        # Step 4: Identify faces to refine
         refine_faces = []
         for face_id, face in enumerate(mesh.faces):
             if any(v in high_curvature_vertices for v in face):
                 refine_faces.append(face_id)
 
-        # Subdivide identified faces
+        # Step 5: Subdivide faces containing high-curvature vertices
         if refine_faces:
             mesh = mesh.subdivide_loop()
-            print(f"Applied global mesh refinement due to {len(refine_faces)} high-curvature faces.")
+            print(f"Subdivided {len(refine_faces)} faces containing high-curvature vertices.")
         else:
             print("No faces selected for refinement in this iteration.")
+            break
+
+        # Step 6: Recalculate distances and curvature for the updated mesh
+        vertices = mesh.vertices
+        vertex_normals = mesh.vertex_normals
+        distances, _ = white_matter_tree.query(vertices)  # Update distances
+
+        # Recompute curvature
+        mean_curvatures = np.zeros(len(vertices))
+        for i, vertex in enumerate(vertices):
+            if distances[i] > distance_threshold:  # Skip far vertices
+                continue
+
+            neighbors = tree.query_ball_point(vertex, radius)
+            if len(neighbors) > 1:
+                normal_diffs = [
+                    np.dot(vertex_normals[i], vertex_normals[j])
+                    for j in neighbors if i != j
+                ]
+                mean_curvatures[i] = np.mean(np.arccos(np.clip(normal_diffs, -1.0, 1.0)))
 
     print("\nPatchwise refinement complete.")
     return mesh
-
-
 
 
 
@@ -786,11 +806,12 @@ def expand_ventricle_dynamic_fraction_auto(
             ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.6)
             # Refine mesh in high-curvature patches
             ventricle = refine_mesh_patchwise_with_distance(
-                ventricle, white_matter, 
-                distance_threshold=0.06, 
+                mesh=ventricle, 
+                white_matter=white_matter, 
+                distance_threshold=0.01, 
                 radius=0.05, 
-                curvature_threshold=0.3, 
-                max_iterations=1
+                curvature_threshold=0.2, 
+                max_iterations=2
             )
 
 
@@ -820,7 +841,7 @@ def expand_ventricle_dynamic_fraction_auto(
 
 # Main function
 if __name__ == "__main__":
-    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
+    ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=20)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
     white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.21, outer_radius=0.6, num_points=8, extrusion=0.6)
