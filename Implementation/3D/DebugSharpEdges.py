@@ -694,6 +694,66 @@ def adaptive_laplacian_smoothing(vertices, faces, white_matter_vertices, vertex_
 
     return vertices
 
+def adaptive_refinement(mesh, white_matter_mesh, curvature_threshold=0.05, proximity_threshold=0.01):
+    """
+    Refine the mesh adaptively in regions with high curvature (concave areas) or near the white matter surface,
+    and ensure the resulting mesh is watertight.
+
+    Parameters:
+        - mesh: Trimesh object (ventricular mesh).
+        - white_matter_mesh: Trimesh object (white matter mesh).
+        - curvature_threshold: Threshold for curvature to refine concave areas.
+        - proximity_threshold: Distance threshold for proximity-based refinement.
+
+    Returns:
+        - watertight_mesh: Trimesh object with adaptively refined and watertight mesh.
+    """
+    from scipy.spatial import cKDTree
+
+    # Step 1: Compute vertex normals and curvature
+    vertex_normals = mesh.vertex_normals
+    vertices = mesh.vertices
+    faces = mesh.faces
+
+    # Calculate curvature as the deviation of vertex normals
+    curvature = np.zeros(len(vertices))
+    adjacency = mesh.vertex_neighbors
+    for i, neighbors in enumerate(adjacency):
+        neighbor_normals = vertex_normals[neighbors]
+        curvature[i] = np.linalg.norm(vertex_normals[i] - neighbor_normals.mean(axis=0))
+
+    # Step 2: Identify vertices near the white matter surface
+    kdtree = cKDTree(white_matter_mesh.vertices)
+    distances, _ = kdtree.query(vertices)
+
+    # Step 3: Mark triangles for refinement
+    refine_faces = []
+    for face_idx, face in enumerate(faces):
+        face_curvature = curvature[face].mean()
+        face_distance = distances[face].mean()
+        
+        if face_curvature > curvature_threshold or face_distance < proximity_threshold:
+            refine_faces.append(face_idx)
+
+    # Step 4: Subdivide marked triangles
+    print(f"Refining {len(refine_faces)} triangles with high curvature or proximity...")
+    refined_mesh = mesh.subdivide(face_index=refine_faces)
+
+    # Step 5: Fix mesh connectivity and ensure watertightness
+    print("Ensuring the mesh is watertight...")
+    meshfix = MeshFix(refined_mesh.vertices, refined_mesh.faces)
+    meshfix.repair(verbose=False, joincomp=True, remove_smallest_components=True)
+    watertight_mesh = trimesh.Trimesh(vertices=meshfix.points, faces=meshfix.faces)
+
+    # Validate watertightness
+    if not watertight_mesh.is_watertight:
+        print("Warning: The mesh is still not fully watertight after repair.")
+    else:
+        print("Mesh successfully refined and made watertight.")
+
+    return watertight_mesh  
+
+
 def enforce_boundary(vertices, white_matter_vertices, threshold=0.01):
     """
     Prevent vertices from overshooting the white matter boundary.
@@ -972,6 +1032,8 @@ def expand_ventricle_dynamic_fraction_auto(
                 "vectors": step_vectors
             })
 
+            ventricle = adaptive_refinement(ventricle, white_matter, curvature_threshold=0.3, proximity_threshold=0.01)
+
             # Remesh to constant face area
             ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.001)
 
@@ -1021,7 +1083,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.21, outer_radius=0.6, num_points=8, extrusion=0.6)
+    white_matter = generate_star_polygon(center=(0, 0, -0.4), inner_radius=0.21, outer_radius=0.6, num_points=8, extrusion=0.8)
     # white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.7, resolution=200, petal_amplitude=0.2, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
