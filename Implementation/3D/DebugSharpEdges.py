@@ -445,6 +445,159 @@ def remesh_to_constant_face_area(mesh, max_face_area):
 
     return remeshed_mesh
 
+def detect_crossing_edges(ventricle_mesh, white_matter_mesh):
+    """
+    Detect edges in the ventricle mesh that cross the white matter mesh.
+    
+    Parameters:
+        - ventricle_mesh: Trimesh object of the ventricle mesh.
+        - white_matter_mesh: Trimesh object of the white matter mesh.
+    
+    Returns:
+        - crossing_edges: List of edge indices that cross the white matter mesh.
+    """
+    crossing_edges = []
+
+    # Extract vertices and edges
+    vertices = ventricle_mesh.vertices
+    edges = ventricle_mesh.edges_unique  # Unique edges
+
+    # Loop through all edges
+    for i, edge in enumerate(edges):
+        v1 = vertices[edge[0]]
+        v2 = vertices[edge[1]]
+        direction = v2 - v1
+        length = np.linalg.norm(direction)
+        
+        if length == 0:  # Skip degenerate edges
+            continue
+
+        direction /= length  # Normalize the direction vector
+
+        # Cast a ray from v1 in the direction of v2
+        locations, index_ray, index_tri = white_matter_mesh.ray.intersects_location(
+            ray_origins=[v1], ray_directions=[direction]
+        )
+
+        # Check if any intersection occurs along the segment
+        for loc in locations:
+            if 0 < np.linalg.norm(loc - v1) < length:
+                crossing_edges.append(i)
+                break  # Move to next edge once a crossing is found
+
+    print(f"Detected {len(crossing_edges)} edges crossing the white matter mesh.")
+    return crossing_edges
+
+def split_and_fix_crossing_edges(ventricle_mesh, white_matter_mesh):
+    """
+    Split edges crossing the white matter mesh, repair the mesh, and ensure watertightness.
+    """
+    crossing_edges = detect_crossing_edges(ventricle_mesh, white_matter_mesh)
+    vertices = ventricle_mesh.vertices.copy()
+    faces = ventricle_mesh.faces.copy()
+
+    new_vertices = []  # New vertices (midpoints)
+    new_faces = []     # New faces to replace affected ones
+
+    midpoint_cache = {}  # Cache to store midpoints and avoid duplication
+
+    for edge_idx in crossing_edges:
+        v1_idx, v2_idx = ventricle_mesh.edges_unique[edge_idx]
+        v1, v2 = vertices[v1_idx], vertices[v2_idx]
+
+        # Calculate midpoint and check for duplicates
+        edge_key = tuple(sorted([v1_idx, v2_idx]))
+        if edge_key not in midpoint_cache:
+            midpoint = (v1 + v2) / 2
+            new_vertex_idx = len(vertices) + len(new_vertices)
+            new_vertices.append(midpoint)
+            midpoint_cache[edge_key] = new_vertex_idx
+        else:
+            new_vertex_idx = midpoint_cache[edge_key]
+
+        # Find faces containing the edge
+        face_indices = np.where(
+            (faces == v1_idx).sum(axis=1) + (faces == v2_idx).sum(axis=1) == 2
+        )[0]
+        for face_idx in face_indices:
+            face = faces[face_idx]
+            remaining_vertex = face[(face != v1_idx) & (face != v2_idx)][0]
+
+            # Replace the old face with two new faces using the midpoint
+            new_faces.append([v1_idx, new_vertex_idx, remaining_vertex])
+            new_faces.append([v2_idx, new_vertex_idx, remaining_vertex])
+
+            # Mark the old face for removal
+            faces[face_idx] = [-1, -1, -1]
+
+    # Remove old faces and add new vertices/faces
+    faces = faces[~np.all(faces == -1, axis=1)]  # Remove invalid faces
+    vertices = np.vstack([vertices, new_vertices])
+    faces = np.vstack([faces, np.array(new_faces)])
+
+    # Rebuild the mesh
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
+
+    # Explicitly clean the mesh
+    mesh.update_faces(mesh.nondegenerate_faces())  # Remove degenerate faces
+    mesh.remove_unreferenced_vertices()            # Remove unused vertices
+
+    # Fill holes safely without processing normals
+    if not mesh.is_watertight:
+        print("Mesh has holes. Attempting manual fill...")
+        filled_mesh = mesh.fill_holes()
+        if isinstance(filled_mesh, trimesh.Trimesh):
+            mesh = filled_mesh
+
+    # Validate vertices
+    mesh.vertices = np.nan_to_num(mesh.vertices, nan=0.0, posinf=0.0, neginf=0.0)
+
+    print(f"Added {len(new_vertices)} vertices and {len(new_faces)} new faces.")
+    print(f"Mesh is watertight: {mesh.is_watertight}")
+    return mesh
+
+def correct_vertices_outside_mesh(mesh, boundary_mesh):
+    """
+    Correct vertices outside the boundary mesh by projecting them onto its surface.
+    Ensures finite vertex positions and prevents duplicates.
+
+    Parameters:
+        - mesh: Trimesh object containing vertices to correct.
+        - boundary_mesh: Trimesh object representing the boundary (white matter).
+
+    Returns:
+        - corrected_mesh: Trimesh object with updated vertices.
+    """
+    print("Correcting vertices outside the boundary mesh...")
+    
+    corrected_vertices = mesh.vertices.copy()
+    boundary_tree = boundary_mesh.nearest  # KDTree for efficient nearest-surface queries
+
+    # Project vertices onto the boundary surface
+    for i, vertex in enumerate(corrected_vertices):
+        closest_point, distance, _ = boundary_tree.on_surface([vertex])
+        if not np.isfinite(vertex).all():  # Skip invalid vertices
+            continue
+        if distance > 1e-6:  # If vertex is outside the boundary (with small tolerance)
+            corrected_vertices[i] = closest_point[0]  # Project vertex to boundary
+
+    # Ensure no NaN or infinite values remain
+    corrected_vertices = np.nan_to_num(corrected_vertices, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # Round to avoid floating-point artifacts
+    corrected_vertices = np.round(corrected_vertices, decimals=8)
+
+    # Rebuild the mesh with corrected vertices
+    corrected_mesh = trimesh.Trimesh(vertices=corrected_vertices, faces=mesh.faces)
+    print("Vertex correction complete. Checking for validity...")
+
+    # Final check for validity
+    if not np.all(np.isfinite(corrected_mesh.vertices)):
+        raise ValueError("Invalid vertices detected after correction.")
+    return corrected_mesh
+
+
+
 
 # Laplacian smoothing
 def laplacian_smoothing(mesh, iterations=2, lambda_factor=0.2):
@@ -743,6 +896,7 @@ def expand_ventricle_dynamic_fraction_auto(
         print(f"Offset white matter mesh created with threshold: {threshold}")
 
         for step in range(steps):
+            print(f"Starting Step {step}")  # Debug step value
             previous_vertices = ventricle.vertices.copy()
             normals = calculate_corrected_vertex_normals(previous_vertices, ventricle.faces)
 
@@ -761,8 +915,16 @@ def expand_ventricle_dynamic_fraction_auto(
             # Identify vertices inside the no-movement zone
             vertices_in_offset = []
             for i, vertex in enumerate(previous_vertices):
-                closest_point, _, _ = offset_white_matter.nearest.on_surface([vertex])
-                if np.linalg.norm(closest_point - vertex) <= threshold:
+                # Distance to offset mesh
+                offset_closest_point, _, _ = offset_white_matter.nearest.on_surface([vertex])
+                offset_distance = np.linalg.norm(offset_closest_point - vertex)
+                
+                # Distance to white matter mesh
+                wm_closest_point, _, _ = white_matter.nearest.on_surface([vertex])
+                wm_distance = np.linalg.norm(wm_closest_point - vertex)
+
+                # Check if vertex is between offset and white matter or beyond white matter
+                if offset_distance <= threshold or wm_distance < offset_distance:
                     vertices_in_offset.append(i)
 
             # Adjust expansion fraction dynamically
@@ -773,16 +935,37 @@ def expand_ventricle_dynamic_fraction_auto(
             # Expand vertices
             for i, (vertex, normal) in enumerate(zip(previous_vertices, normals)):
                 if i not in vertices_in_offset and distances[i] < np.inf:
+                    # Calculate move vector
                     move_vector = normal * min(distances[i] * fraction, distances[i])
                     new_vertices[i] = vertex + move_vector
+
+                    # Store position and expansion vector
                     step_vectors.append({
                         "position": vertex.tolist(),
                         "vector": move_vector.tolist()
                     })
+            
+            '''if step > 1:
+                print(f"Correction done!")
+                # Correct vertices that crossed the white matter surface
+                new_vertices = correct_crossing_vertices(
+                    vertices=previous_vertices,
+                    expanded_vertices=new_vertices,
+                    faces=ventricle.faces, 
+                    white_matter_mesh=white_matter
+                )'''
 
-            # Update ventricle mesh
             ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
+            '''
+            # Correct vertices outside the white matter boundary
+            ventricle = correct_vertices_outside_mesh(ventricle, white_matter)
 
+            # Fix edges that cross the white matter mesh
+            crossing_edges = detect_crossing_edges(ventricle, white_matter)
+            if crossing_edges:
+                print(f"Fixing {len(crossing_edges)} crossing edges...")
+                ventricle = split_and_fix_crossing_edges(ventricle, white_matter)
+        '''
             # Store expansion data
             expansion_data.append({
                 "step": step_counter,
@@ -790,7 +973,7 @@ def expand_ventricle_dynamic_fraction_auto(
             })
 
             # Remesh to constant face area
-            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
+            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.001)
 
             # Recalculate normals and apply adaptive smoothing
             updated_normals = calculate_corrected_vertex_normals(ventricle.vertices, ventricle.faces)
@@ -799,17 +982,9 @@ def expand_ventricle_dynamic_fraction_auto(
                 faces=ventricle.faces,
                 white_matter_vertices=white_matter.vertices,
                 vertex_normals=updated_normals,
-                alpha=0.6, beta=0.3, gamma=0.3, lambda_smooth=0.6, iterations=4,
+                alpha=0.1, beta=0.1, gamma=0.2, lambda_smooth=0.6, iterations=4,
                 skip_vertices=vertices_in_offset  # Skip vertices in the threshold zones
             )
-            # Step 4: Correct any vertices overshooting the white matter boundary
-            '''
-            ventricle.vertices = enforce_boundary(
-                vertices=ventricle.vertices,
-                white_matter_vertices=white_matter.vertices,
-                threshold=0.005  # Allowable boundary threshold
-            )
-            '''
 
             # Save the current step
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
@@ -822,7 +997,7 @@ def expand_ventricle_dynamic_fraction_auto(
 
             # Check if enough vertices are within the threshold
             current_percentage = len(vertices_in_offset) / len(previous_vertices)
-            print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold.")
+            print(f"Step {step_counter}: {current_percentage * 100:.2f}% of vertices within threshold: {threshold}")
             if current_percentage >= percentage:
                 print(f"Stage {stage_idx + 1} completed. Moving to the next stage.")
                 break
@@ -846,7 +1021,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=50)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.3, outer_radius=0.6, num_points=8, extrusion=0.6)
+    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.21, outer_radius=0.6, num_points=8, extrusion=0.6)
     # white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.7, resolution=200, petal_amplitude=0.2, petal_frequency=3)
 
     white_matter_face = np.mean(white_matter.area_faces)
@@ -856,11 +1031,11 @@ if __name__ == "__main__":
         ventricle = ventricle, 
         white_matter = white_matter, 
         steps=20, 
-        f_min=0.2, 
-        f_max=0.35,
+        f_min=0.1, 
+        f_max=0.11,
         # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
-        thresholds=[0.05, 0.02, 0.01],
-        percentages=[0.35, 0.6, 0.95]    # Required percentages
+        thresholds=[0.01, 0.005, 0.001],
+        percentages=[0.5, 0.6, 0.95]    # Required percentages
         )
 
     print("\nFinal Expanded Ventricle Mesh:")
