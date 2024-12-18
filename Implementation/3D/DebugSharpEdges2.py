@@ -591,100 +591,134 @@ def compare_vertex_displacements(previous_vertices, current_vertices, step):
     return total_displacement
 
 
-def refine_mesh_patchwise_with_distance(mesh, white_matter, distance_threshold=0.01, 
-                                        radius=0.05, curvature_threshold=0.5, max_iterations=2):
+def refine_mesh_near_high_curvature(mesh, white_matter, step,
+                                    white_matter_curvature_threshold=30, 
+                                    distance_threshold=0.01, 
+                                    max_iterations=2):
     """
-    Refine mesh resolution in patches with high curvature and within a distance threshold to another mesh.
+    Refine mesh resolution in areas close to high-curvature regions of another mesh.
 
     Parameters:
         - mesh: Trimesh object to refine (ventricular mesh).
-        - white_matter: Trimesh object representing the white matter boundary.
-        - distance_threshold: Maximum distance to white matter to trigger refinement.
-        - radius: Radius defining the neighborhood patch around each vertex.
-        - curvature_threshold: Threshold of average curvature to trigger refinement.
+        - white_matter: Trimesh object (white matter mesh).
+        - white_matter_curvature_threshold: Angle threshold (degrees) to identify sharp/high-curvature regions.
+        - distance_threshold: Maximum distance to trigger subdivision near high-curvature regions.
         - max_iterations: Number of refinement iterations.
 
     Returns:
         - refined_mesh: Trimesh object with locally refined resolution.
     """
+    print("Calculating high-curvature areas based on face normal differences...")
 
+    # Step 1: Calculate face normal differences to identify high-curvature edges
+    face_normals = white_matter.face_normals
+    edge_faces = white_matter.face_adjacency  # Pairs of faces sharing an edge
+    edge_vertices = white_matter.face_adjacency_edges  # Corresponding edge vertex pairs
+
+    high_curvature_edges = []  # List of sharp edges
+    high_curvature_vertices = set()  # Store connected vertices
+    high_curvature_faces = set()  # Store connected faces
+
+    for i, (face1, face2) in enumerate(edge_faces):
+        normal1 = face_normals[face1]
+        normal2 = face_normals[face2]
+        angle = np.degrees(np.arccos(np.clip(np.dot(normal1, normal2), -1.0, 1.0)))
+        
+        if angle > white_matter_curvature_threshold:
+            # Edge is sharp
+            high_curvature_edges.append(edge_vertices[i])
+            high_curvature_vertices.update(edge_vertices[i])
+
+            # Collect the faces connected to this edge
+            high_curvature_faces.add(face1)
+            high_curvature_faces.add(face2)
+
+    # Extract the 3D coordinates of high-curvature vertices
+    high_curvature_vertices = np.array(list(high_curvature_vertices))  # Unique vertex indices
+    high_curvature_positions = white_matter.vertices[high_curvature_vertices]  # Get their positions
+
+    print(f"Found {len(high_curvature_edges)} high-curvature edges with angle > {white_matter_curvature_threshold} degrees.")
+    print(f"Selected {len(high_curvature_faces)} faces connected to high-curvature edges.")
+
+    if step == 1:
+        visualize_high_curvature_edges(white_matter, high_curvature_edges)
+
+    # Step 2: Build KDTree for high-curvature vertex positions
+    high_curvature_tree = cKDTree(high_curvature_positions)
+
+    # Step 3: Refine the ventricular mesh near high-curvature regions
     vertices = mesh.vertices
-    tree = cKDTree(vertices)  # KDTree for efficient neighbor search
-
-    # Step 1: Compute distances using KDTree
-    print("Building KDTree for white matter mesh...")
-    white_matter_tree = cKDTree(white_matter.vertices)
-    distances, _ = white_matter_tree.query(vertices)  # Distances from mesh vertices to white matter
-    print(f"Number of distances: {len(distances)}, Number of vertices: {len(vertices)}")
-    print(f"Sample distances: {distances[:5]}")
+    faces = mesh.faces
 
     for iteration in range(max_iterations):
-        print(f"\nPatchwise refinement iteration {iteration + 1}")
-        
-        vertex_normals = mesh.vertex_normals
-        mean_curvatures = np.zeros(len(vertices))
+        print(f"\nRefinement iteration {iteration + 1}")
 
-        # Step 2: Compute mean curvature for each vertex
-        for i, vertex in enumerate(vertices):
-            if distances[i] > distance_threshold:  # Skip vertices far from the white matter mesh
-                continue
+        # Find ventricular vertices near high-curvature vertices
+        distances, indices = high_curvature_tree.query(vertices)
+        close_vertices = np.where(distances < distance_threshold)[0]
 
-            # Find neighbors within the specified radius
-            neighbors = tree.query_ball_point(vertex, radius)
-            if len(neighbors) > 1:
-                normal_diffs = [
-                    np.dot(vertex_normals[i], vertex_normals[j])
-                    for j in neighbors if i != j
-                ]
-                mean_curvatures[i] = np.mean(np.arccos(np.clip(normal_diffs, -1.0, 1.0)))
-
-        # Step 3: Identify vertices for refinement
-        high_curvature_vertices = np.where(
-            (mean_curvatures > curvature_threshold) & (distances <= distance_threshold)
-        )[0]
-
-        if len(high_curvature_vertices) == 0:
-            print("No high-curvature patches found within the distance threshold.")
+        if len(close_vertices) == 0:
+            print("No ventricular vertices found near high-curvature regions.")
             break
 
-        print(f"Found {len(high_curvature_vertices)} high-curvature vertices near white matter.")
+        print(f"Found {len(close_vertices)} ventricular vertices near high-curvature regions.")
 
-        # Step 4: Identify faces to refine
-        refine_faces = []
-        for face_id, face in enumerate(mesh.faces):
-            if any(v in high_curvature_vertices for v in face):
-                refine_faces.append(face_id)
+        # Subdivide faces containing the close vertices
+        new_vertices = vertices.tolist()
+        new_faces = []
 
-        # Step 5: Subdivide faces containing high-curvature vertices
-        if refine_faces:
-            mesh = mesh.subdivide_loop()
-            print(f"Subdivided {len(refine_faces)} faces containing high-curvature vertices.")
-        else:
-            print("No faces selected for refinement in this iteration.")
-            break
+        for face in faces:
+            if any(v in close_vertices for v in face):
+                # Subdivide the face by adding a new vertex at the centroid
+                v0, v1, v2 = face
+                centroid = (vertices[v0] + vertices[v1] + vertices[v2]) / 3
+                centroid_index = len(new_vertices)
+                new_vertices.append(centroid)
 
-        # Step 6: Recalculate distances and curvature for the updated mesh
-        vertices = mesh.vertices
-        vertex_normals = mesh.vertex_normals
-        distances, _ = white_matter_tree.query(vertices)  # Update distances
+                # Split into three smaller triangles
+                new_faces.append([v0, v1, centroid_index])
+                new_faces.append([v1, v2, centroid_index])
+                new_faces.append([v2, v0, centroid_index])
+            else:
+                # Keep the face unchanged
+                new_faces.append(face)
 
-        # Recompute curvature
-        mean_curvatures = np.zeros(len(vertices))
-        for i, vertex in enumerate(vertices):
-            if distances[i] > distance_threshold:  # Skip far vertices
-                continue
+        # Update mesh
+        vertices = np.array(new_vertices)
+        faces = np.array(new_faces)
+        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
 
-            neighbors = tree.query_ball_point(vertex, radius)
-            if len(neighbors) > 1:
-                normal_diffs = [
-                    np.dot(vertex_normals[i], vertex_normals[j])
-                    for j in neighbors if i != j
-                ]
-                mean_curvatures[i] = np.mean(np.arccos(np.clip(normal_diffs, -1.0, 1.0)))
+        print(f"Subdivision complete. New vertex count: {len(vertices)}, new face count: {len(faces)}")
 
-    print("\nPatchwise refinement complete.")
+    print("\nRefinement complete.")
     return mesh
 
+def visualize_high_curvature_edges(mesh, high_curvature_edges):
+    """
+    Visualize high-curvature edges on the white matter mesh.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - high_curvature_edges: List of high-curvature edges to highlight.
+    """
+    import pyvista as pv
+
+    pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
+    pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
+
+    # Highlight high-curvature edges
+    edge_lines = pv.PolyData()
+    for edge in high_curvature_edges:
+        line = pv.Line(mesh.vertices[edge[0]], mesh.vertices[edge[1]])
+        edge_lines += line
+
+    # Plot mesh and sharp edges
+    plotter = pv.Plotter()
+    plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6)
+    plotter.add_mesh(edge_lines, color="red", line_width=3, label="High-Curvature Edges")
+    plotter.add_legend()
+    plotter.add_text("High-Curvature Edges on White Matter Mesh", font_size=12)
+    plotter.show()
 
 
 def expand_ventricle_dynamic_fraction_auto(
@@ -805,15 +839,14 @@ def expand_ventricle_dynamic_fraction_auto(
             ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
             ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.6)
             # Refine mesh in high-curvature patches
-            ventricle = refine_mesh_patchwise_with_distance(
+            ventricle = refine_mesh_near_high_curvature(
                 mesh=ventricle, 
                 white_matter=white_matter, 
-                distance_threshold=0.01, 
-                radius=0.05, 
-                curvature_threshold=0.2, 
-                max_iterations=2
+                step=step_counter, 
+               white_matter_curvature_threshold=30, 
+                distance_threshold=0.04, 
+                max_iterations=1,
             )
-
 
             # Save the combined ventricular and white matter meshes
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
@@ -844,7 +877,7 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=20)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.21, outer_radius=0.6, num_points=8, extrusion=0.6)
+    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=6, extrusion=0.6)
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
@@ -852,12 +885,12 @@ if __name__ == "__main__":
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
         white_matter = white_matter, 
-        steps=40, 
+        steps=1000, 
         f_min=0.15, 
         f_max=0.25,
         # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
-        thresholds=[0.01],
-        percentages=[0.9, 0.8, 0.95]    # Required percentages
+        thresholds=[0.08, 0.01],
+        percentages=[0.6, 0.8, 0.95]    # Required percentages
         )
 
     print("\nFinal Expanded Ventricle Mesh:")
