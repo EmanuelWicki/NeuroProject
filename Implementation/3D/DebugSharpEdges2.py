@@ -784,29 +784,58 @@ def find_high_curvature_vertices(mesh, curvature_threshold=np.deg2rad(30)):
     print(f"Found {len(high_curvature_vertices)} high-curvature vertices.")
     return high_curvature_vertices
 
-def visualize_high_curvature_vertices(mesh, high_curvature_vertices):
+def expand_critical_vertices(mesh, high_curvature_vertices, expansion_radius=0.02):
+    """
+    Expand critical vertices to include all vertices within a given radius.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - high_curvature_vertices: List of initial high-curvature vertex indices.
+        - expansion_radius: Radius within which neighboring vertices are considered critical.
+
+    Returns:
+        - expanded_vertices: List of all vertex indices within the expanded critical region.
+    """
+    print("Expanding critical vertices to include neighbors...")
+
+    # Build KDTree of all vertices in the mesh
+    tree = cKDTree(mesh.vertices)
+
+    # Initialize a set for expanded vertices
+    expanded_vertices = set(high_curvature_vertices)
+
+    # Query neighboring vertices for each high-curvature vertex
+    for vertex_idx in high_curvature_vertices:
+        # Find all vertices within the expansion radius
+        neighbors = tree.query_ball_point(mesh.vertices[vertex_idx], expansion_radius)
+        expanded_vertices.update(neighbors)
+
+    expanded_vertices = list(expanded_vertices)
+    print(f"Expanded critical region to {len(expanded_vertices)} vertices.")
+    return expanded_vertices
+
+def visualize_high_curvature_vertices(mesh, critical_vertices):
     """
     Visualize high-curvature vertices on the white matter mesh.
 
     Parameters:
         - mesh: Trimesh object (white matter mesh).
-        - high_curvature_vertices: List of vertex indices with high curvature.
+        - critical_vertices: List of vertex indices to highlight.
     """
-    import pyvista as pv
 
     # Step 1: Prepare PyVista mesh
     pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
     pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
 
-    # Extract high-curvature vertices
-    critical_points = mesh.vertices[high_curvature_vertices]
+    # Extract critical vertices
+    critical_points = mesh.vertices[critical_vertices]
 
     # Step 2: Visualization
     plotter = pv.Plotter()
     plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6, label="White Matter Mesh")
-    plotter.add_points(critical_points, color="red", point_size=9, label="High-Curvature Vertices")
+    plotter.add_points(critical_points, color="red", point_size=10, label="Expanded Critical Vertices")
     plotter.add_legend()
-    plotter.add_text("High-Curvature Vertices on White Matter Mesh", font_size=12)
+    plotter.add_text("Expanded Critical Vertices on White Matter Mesh", font_size=12)
     plotter.show()
 
 def visualize_high_curvature_edges(mesh, high_curvature_edges):
@@ -1054,14 +1083,17 @@ if __name__ == "__main__":
     print(f"Average face area of the white matter mesh: {white_matter_face}")
 
     # Find high-curvature edges
-    curvature_threshold = np.deg2rad(5)  # 30 degrees threshold for curvature
+    curvature_threshold = np.deg2rad(3)  # 30 degrees threshold for curvature
     # high_curvature_edges = find_high_curvature_edges(white_matter, curvature_threshold=curvature_threshold)
     high_curvature_vertices = find_high_curvature_vertices(white_matter, curvature_threshold=curvature_threshold)
+    
+    # Expand the critical region
+    expanded_vertices = expand_critical_vertices(white_matter, high_curvature_vertices, expansion_radius=0.02)
 
     # Visualize high-curvature edges
     # visualize_high_curvature_edges(white_matter, high_curvature_edges)
     # visualize_high_curvature_faces(white_matter, high_curvature_edges)
-    visualize_high_curvature_vertices(white_matter, high_curvature_vertices)
+    visualize_high_curvature_vertices(white_matter, expanded_vertices)
 
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
