@@ -747,6 +747,67 @@ def find_high_curvature_edges(mesh, curvature_threshold=np.deg2rad(30)):
     print(f"Found {len(high_curvature_edges)} high-curvature edges.")
     return high_curvature_edges
 
+def find_high_curvature_vertices(mesh, curvature_threshold=np.deg2rad(30)):
+    """
+    Identify high-curvature vertices based on deviations in vertex normals.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - curvature_threshold: Threshold in radians to identify high-curvature regions.
+
+    Returns:
+        - high_curvature_vertices: List of vertex indices with high curvature.
+    """
+    print("Finding high-curvature vertices...")
+
+    # Compute vertex normals and neighbors
+    vertex_normals = mesh.vertex_normals
+    vertex_neighbors = mesh.vertex_neighbors
+
+    high_curvature_vertices = []
+
+    for i, neighbors in enumerate(vertex_neighbors):
+        if len(neighbors) < 2:
+            continue  # Skip isolated vertices
+
+        # Compute the average normal of the neighboring vertices
+        neighbor_normals = vertex_normals[neighbors]
+        avg_normal = neighbor_normals.mean(axis=0)
+        avg_normal /= np.linalg.norm(avg_normal)
+
+        # Compare the vertex normal to the average normal of its neighbors
+        angle = np.arccos(np.clip(np.dot(vertex_normals[i], avg_normal), -1.0, 1.0))
+
+        if angle > curvature_threshold:
+            high_curvature_vertices.append(i)
+
+    print(f"Found {len(high_curvature_vertices)} high-curvature vertices.")
+    return high_curvature_vertices
+
+def visualize_high_curvature_vertices(mesh, high_curvature_vertices):
+    """
+    Visualize high-curvature vertices on the white matter mesh.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - high_curvature_vertices: List of vertex indices with high curvature.
+    """
+    import pyvista as pv
+
+    # Step 1: Prepare PyVista mesh
+    pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
+    pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
+
+    # Extract high-curvature vertices
+    critical_points = mesh.vertices[high_curvature_vertices]
+
+    # Step 2: Visualization
+    plotter = pv.Plotter()
+    plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6, label="White Matter Mesh")
+    plotter.add_points(critical_points, color="red", point_size=9, label="High-Curvature Vertices")
+    plotter.add_legend()
+    plotter.add_text("High-Curvature Vertices on White Matter Mesh", font_size=12)
+    plotter.show()
 
 def visualize_high_curvature_edges(mesh, high_curvature_edges):
     """
@@ -774,6 +835,44 @@ def visualize_high_curvature_edges(mesh, high_curvature_edges):
     plotter.add_text("High-Curvature Edges on White Matter Mesh", font_size=12)
     plotter.show()
 
+def visualize_high_curvature_faces(mesh, high_curvature_edges):
+    """
+    Visualize faces connected to high-curvature edges on the white matter mesh.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - high_curvature_edges: List of high-curvature edges to highlight.
+    """
+    import pyvista as pv
+
+    # Step 1: Identify faces containing high-curvature edges
+    high_curvature_faces = set()
+    for edge in high_curvature_edges:
+        for face_id, face in enumerate(mesh.faces):
+            if edge[0] in face and edge[1] in face:  # Check if edge vertices are in the face
+                high_curvature_faces.add(face_id)
+
+    # Extract the high-curvature faces
+    critical_faces = np.array(list(high_curvature_faces))
+    critical_face_indices = mesh.faces[critical_faces]
+
+    # Step 2: Prepare PyVista mesh for visualization
+    pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
+    pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
+
+    # Create a separate mesh for the high-curvature faces
+    critical_faces_pv = pv.PolyData()
+    for face in critical_face_indices:
+        polygon = pv.PolyData(np.array(mesh.vertices[face]), faces=[3, 0, 1, 2])
+        critical_faces_pv += polygon
+
+    # Step 3: Visualization
+    plotter = pv.Plotter()
+    plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6, label="White Matter Mesh")
+    plotter.add_mesh(critical_faces_pv, color="red", opacity=0.8, label="Critical Regions")
+    plotter.add_legend()
+    plotter.add_text("Critical Regions on White Matter Mesh", font_size=12)
+    plotter.show()
 
 
 def expand_ventricle_dynamic_fraction_auto(
@@ -949,17 +1048,20 @@ if __name__ == "__main__":
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
     # white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=6, extrusion=0.6)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.2, resolution=150, petal_amplitude=0.1, petal_frequency=4) 
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.2, resolution=150, petal_amplitude=0.05, petal_frequency=3) 
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
 
     # Find high-curvature edges
-    curvature_threshold = np.deg2rad(10)  # 30 degrees threshold for curvature
-    high_curvature_edges = find_high_curvature_edges(white_matter, curvature_threshold=curvature_threshold)
+    curvature_threshold = np.deg2rad(5)  # 30 degrees threshold for curvature
+    # high_curvature_edges = find_high_curvature_edges(white_matter, curvature_threshold=curvature_threshold)
+    high_curvature_vertices = find_high_curvature_vertices(white_matter, curvature_threshold=curvature_threshold)
 
     # Visualize high-curvature edges
-    visualize_high_curvature_edges(white_matter, high_curvature_edges)
+    # visualize_high_curvature_edges(white_matter, high_curvature_edges)
+    # visualize_high_curvature_faces(white_matter, high_curvature_edges)
+    visualize_high_curvature_vertices(white_matter, high_curvature_vertices)
 
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
