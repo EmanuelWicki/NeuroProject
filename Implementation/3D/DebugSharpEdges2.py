@@ -323,7 +323,7 @@ def generate_star_polygon(center, outer_radius, inner_radius, num_points=5, extr
     mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces))
     
     # Subdivide to refine mesh
-    iterations = 4
+    iterations = 5
     for _ in range(iterations):
         mesh = mesh.subdivide()  # Subdivide all faces
     print(f"Mesh refined: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces.")
@@ -591,162 +591,6 @@ def compare_vertex_displacements(previous_vertices, current_vertices, step):
     return total_displacement
 
 
-def refine_mesh_near_high_curvature(mesh, white_matter, step,
-                                    white_matter_curvature_threshold=30, 
-                                    distance_threshold=0.01, 
-                                    max_iterations=2):
-    """
-    Refine mesh resolution in areas close to high-curvature regions of another mesh.
-    Already-refined white matter regions are excluded from further refinement.
-
-    Parameters:
-        - mesh: Trimesh object to refine (ventricular mesh).
-        - white_matter: Trimesh object (white matter mesh).
-        - white_matter_curvature_threshold: Angle threshold (degrees) to identify sharp/high-curvature regions.
-        - distance_threshold: Maximum distance to trigger subdivision near high-curvature regions.
-        - max_iterations: Number of refinement iterations.
-
-    Returns:
-        - refined_mesh: Trimesh object with locally refined resolution.
-    """
-    print("Calculating high-curvature areas based on face normal differences...")
-
-    # Step 1: Calculate face normal differences to identify high-curvature edges
-    face_normals = white_matter.face_normals
-    edge_faces = white_matter.face_adjacency  # Pairs of faces sharing an edge
-    edge_vertices = white_matter.face_adjacency_edges  # Corresponding edge vertex pairs
-
-    high_curvature_edges = []  # List of sharp edges
-    high_curvature_vertices = set()  # Store connected vertices
-    high_curvature_faces = set()  # Store connected faces
-
-    for i, (face1, face2) in enumerate(edge_faces):
-        normal1 = face_normals[face1]
-        normal2 = face_normals[face2]
-        angle = np.degrees(np.arccos(np.clip(np.dot(normal1, normal2), -1.0, 1.0)))
-        
-        if angle > white_matter_curvature_threshold:
-            # Edge is sharp
-            high_curvature_edges.append(edge_vertices[i])
-            high_curvature_vertices.update(edge_vertices[i])
-
-            # Collect the faces connected to this edge
-            high_curvature_faces.add(face1)
-            high_curvature_faces.add(face2)
-
-    high_curvature_vertices = np.array(list(high_curvature_vertices))  # Unique vertex indices
-    high_curvature_positions = white_matter.vertices[high_curvature_vertices]  # Get their positions
-
-    print(f"Found {len(high_curvature_edges)} high-curvature edges with angle > {white_matter_curvature_threshold} degrees.")
-    print(f"Selected {len(high_curvature_faces)} faces connected to high-curvature edges.")
-
-    if step == 1:
-        visualize_high_curvature_edges(white_matter, high_curvature_edges)
-
-    # Track already refined vertices
-    used_high_curvature_indices = set()
-
-    # Step 2: Start refinement iterations
-    vertices = mesh.vertices
-    faces = mesh.faces
-
-    for iteration in range(max_iterations):
-        print(f"\nRefinement iteration {iteration + 1}")
-
-        # Filter unused high-curvature vertices
-        unused_indices = [i for i, idx in enumerate(high_curvature_vertices) 
-                          if idx not in used_high_curvature_indices]
-
-        if len(unused_indices) == 0:
-            print("No unused high-curvature regions remaining. Stopping refinement.")
-            break
-
-        unused_positions = high_curvature_positions[unused_indices]
-
-        # Build KDTree for unused high-curvature vertices
-        high_curvature_tree = cKDTree(unused_positions)
-
-        # Find ventricular vertices near unused high-curvature regions
-        distances, indices = high_curvature_tree.query(vertices)
-        close_vertices = np.where(distances < distance_threshold)[0]
-
-        if len(close_vertices) == 0:
-            print("No ventricular vertices found near high-curvature regions.")
-            break
-
-        print(f"Found {len(close_vertices)} ventricular vertices near high-curvature regions.")
-
-        # Subdivide faces containing the close vertices
-        new_vertices = vertices.tolist()
-        new_faces = []
-
-        for face in faces:
-            if any(v in close_vertices for v in face):
-                # Subdivide the face by adding a new vertex at the centroid
-                v0, v1, v2 = face
-                centroid = (vertices[v0] + vertices[v1] + vertices[v2]) / 3
-                centroid_index = len(new_vertices)
-                new_vertices.append(centroid)
-
-                # Split the face into three smaller triangles
-                new_faces.append([v0, v1, centroid_index])
-                new_faces.append([v1, v2, centroid_index])
-                new_faces.append([v2, v0, centroid_index])
-            else:
-                # Keep the face unchanged
-                new_faces.append(face)
-
-        # Update mesh
-        vertices = np.array(new_vertices)
-        faces = np.array(new_faces)
-        mesh = trimesh.Trimesh(vertices=vertices, faces=faces)
-
-        print(f"Subdivision complete. New vertex count: {len(vertices)}, new face count: {len(faces)}")
-
-        # Mark high-curvature vertices as used
-        used_indices = high_curvature_vertices[unused_indices[indices]] if isinstance(indices, int) else high_curvature_vertices[[unused_indices[i] for i in indices]]
-        used_high_curvature_indices.update(used_indices)
-
-    print("\nRefinement complete.")
-    return mesh
-
-def find_high_curvature_edges(mesh, curvature_threshold=np.deg2rad(30)):
-    """
-    Identify high-curvature edges based on angles between adjacent face normals.
-
-    Parameters:
-        - mesh: Trimesh object (white matter mesh).
-        - curvature_threshold: Angle threshold in radians to identify sharp edges.
-
-    Returns:
-        - high_curvature_edges: List of edges (pairs of vertex indices) with high curvature.
-    """
-    print("Finding high-curvature edges...")
-
-    # Compute face normals
-    face_normals = mesh.face_normals
-    edges = mesh.edges_sorted  # Unique edges
-
-    # Build adjacency between faces
-    face_adjacency, edge_indices = mesh.face_adjacency, mesh.face_adjacency_edges
-
-    high_curvature_edges = []
-
-    # Loop through adjacent face pairs
-    for (face1, face2), edge in zip(face_adjacency, edge_indices):
-        normal1 = face_normals[face1]
-        normal2 = face_normals[face2]
-
-        # Calculate the angle between the two face normals
-        angle = np.arccos(np.clip(np.dot(normal1, normal2), -1.0, 1.0))
-
-        # Check if the angle exceeds the curvature threshold
-        if angle > curvature_threshold:
-            high_curvature_edges.append(edge)
-
-    print(f"Found {len(high_curvature_edges)} high-curvature edges.")
-    return high_curvature_edges
-
 def find_high_curvature_vertices(mesh, curvature_threshold=np.deg2rad(30)):
     """
     Identify high-curvature vertices based on deviations in vertex normals.
@@ -833,75 +677,115 @@ def visualize_high_curvature_vertices(mesh, critical_vertices):
     # Step 2: Visualization
     plotter = pv.Plotter()
     plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6, label="White Matter Mesh")
-    plotter.add_points(critical_points, color="red", point_size=10, label="Expanded Critical Vertices")
+    plotter.add_points(critical_points, color="red", point_size=5, label="Expanded Critical Vertices")
     plotter.add_legend()
     plotter.add_text("Expanded Critical Vertices on White Matter Mesh", font_size=12)
     plotter.show()
 
-def visualize_high_curvature_edges(mesh, high_curvature_edges):
+def remesh_with_local_max_edge_length(mesh, critical_vertices, critical_distance, local_max_edge_length):
     """
-    Visualize high-curvature edges on the white matter mesh.
+    Subdivide edges of the mesh that exceed a specified maximum edge length,
+    but only if they are near critical vertices.
 
     Parameters:
-        - mesh: Trimesh object (white matter mesh).
-        - high_curvature_edges: List of high-curvature edges to highlight.
+        - mesh: Trimesh object representing the mesh to remesh.
+        - critical_vertices: Nx3 array of critical vertex positions.
+        - critical_distance: Distance threshold to consider vertices 'near' critical areas.
+        - local_max_edge_length: Maximum allowable edge length near critical areas.
+
+    Returns:
+        - refined_mesh: Trimesh object with locally subdivided edges.
     """
+    vertices = mesh.vertices.tolist()
+    faces = mesh.faces
+    edge_midpoint_cache = {}
+    new_faces = []
 
-    pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
-    pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
+    # Extract the coordinates of critical vertices using their indices
+    critical_vertex_indices = expand_critical_vertices(white_matter, high_curvature_vertices, expansion_radius=0.02)
+    critical_vertices = white_matter.vertices[critical_vertex_indices]  # Extract coordinates
 
-    # Highlight high-curvature edges
-    edge_lines = pv.PolyData()
-    for edge in high_curvature_edges:
-        line = pv.Line(mesh.vertices[edge[0]], mesh.vertices[edge[1]])
-        edge_lines += line
+    # Ensure critical_vertices is a valid 2D array
+    critical_vertices = np.asarray(critical_vertices)
+    if critical_vertices.ndim != 2 or critical_vertices.shape[1] != 3:
+        raise ValueError(f"critical_vertices must have shape (n, 3), but got {critical_vertices.shape}")
 
-    # Plot mesh and sharp edges
-    plotter = pv.Plotter()
-    plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6)
-    plotter.add_mesh(edge_lines, color="red", line_width=3, label="High-Curvature Edges")
-    plotter.add_legend()
-    plotter.add_text("High-Curvature Edges on White Matter Mesh", font_size=12)
-    plotter.show()
+    # Build a KDTree for critical vertices
+    critical_tree = cKDTree(critical_vertices)
+    
+    # Identify vertices near critical zones
+    distances, _ = critical_tree.query(mesh.vertices)
+    vertices_near_critical = np.where(distances <= critical_distance)[0]
 
-def visualize_high_curvature_faces(mesh, high_curvature_edges):
-    """
-    Visualize faces connected to high-curvature edges on the white matter mesh.
+    def get_midpoint_index(v0, v1):
+        """
+        Retrieve or create the midpoint vertex index for a given edge.
+        Caches midpoints to avoid duplication.
+        """
+        edge_key = tuple(sorted([v0, v1]))
+        if edge_key not in edge_midpoint_cache:
+            midpoint = (np.array(vertices[v0]) + np.array(vertices[v1])) / 2
+            midpoint_index = len(vertices)
+            vertices.append(midpoint)
+            edge_midpoint_cache[edge_key] = midpoint_index
+        return edge_midpoint_cache[edge_key]
 
-    Parameters:
-        - mesh: Trimesh object (white matter mesh).
-        - high_curvature_edges: List of high-curvature edges to highlight.
-    """
-    import pyvista as pv
+    # Iterate over all faces and check their edges
+    for face in faces:
+        v0, v1, v2 = face
+        edges = [(v0, v1), (v1, v2), (v2, v0)]
+        edge_lengths = [
+            np.linalg.norm(np.array(vertices[e[0]]) - np.array(vertices[e[1]]))
+            for e in edges
+        ]
 
-    # Step 1: Identify faces containing high-curvature edges
-    high_curvature_faces = set()
-    for edge in high_curvature_edges:
-        for face_id, face in enumerate(mesh.faces):
-            if edge[0] in face and edge[1] in face:  # Check if edge vertices are in the face
-                high_curvature_faces.add(face_id)
+        # Check if any vertex in the face is near critical areas
+        if not any(v in vertices_near_critical for v in face):
+            new_faces.append(face)  # Skip the face if not near critical zones
+            continue
 
-    # Extract the high-curvature faces
-    critical_faces = np.array(list(high_curvature_faces))
-    critical_face_indices = mesh.faces[critical_faces]
+        # Split edges near critical zones based on max edge length
+        mid_indices = []
+        for i, (edge, length) in enumerate(zip(edges, edge_lengths)):
+            if length > local_max_edge_length:
+                mid_indices.append(get_midpoint_index(edge[0], edge[1]))
+            else:
+                mid_indices.append(None)
 
-    # Step 2: Prepare PyVista mesh for visualization
-    pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
-    pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
+        # Reconstruct the face based on split edges
+        if mid_indices[0] is not None and mid_indices[1] is not None and mid_indices[2] is not None:
+            # All edges are split - create 4 new faces
+            m0, m1, m2 = mid_indices
+            new_faces.extend([
+                [v0, m0, m2],
+                [m0, v1, m1],
+                [m1, v2, m2],
+                [m0, m1, m2]
+            ])
+        elif mid_indices[0] is not None:
+            m0 = mid_indices[0]
+            new_faces.extend([
+                [v0, m0, v2],
+                [m0, v1, v2]
+            ])
+        elif mid_indices[1] is not None:
+            m1 = mid_indices[1]
+            new_faces.extend([
+                [v1, m1, v0],
+                [m1, v2, v0]
+            ])
+        elif mid_indices[2] is not None:
+            m2 = mid_indices[2]
+            new_faces.extend([
+                [v2, m2, v1],
+                [m2, v0, v1]
+            ])
+        else:
+            new_faces.append(face)
 
-    # Create a separate mesh for the high-curvature faces
-    critical_faces_pv = pv.PolyData()
-    for face in critical_face_indices:
-        polygon = pv.PolyData(np.array(mesh.vertices[face]), faces=[3, 0, 1, 2])
-        critical_faces_pv += polygon
-
-    # Step 3: Visualization
-    plotter = pv.Plotter()
-    plotter.add_mesh(pv_mesh, color="lightgray", opacity=0.6, label="White Matter Mesh")
-    plotter.add_mesh(critical_faces_pv, color="red", opacity=0.8, label="Critical Regions")
-    plotter.add_legend()
-    plotter.add_text("Critical Regions on White Matter Mesh", font_size=12)
-    plotter.show()
+    # Recreate the mesh with updated vertices and faces
+    refined_mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(new_faces), process=True)
+    return refined_mesh
 
 
 def expand_ventricle_dynamic_fraction_auto(
@@ -911,11 +795,14 @@ def expand_ventricle_dynamic_fraction_auto(
     f_min=0.01,
     f_max=0.4,
     thresholds=[0.01, 0.02, 0.03],  # Threshold distances
-    percentages=[0.9, 0.95, 1.0]    # Percentage of vertices required within each threshold
+    percentages=[0.9, 0.95, 1.0],    # Percentage of vertices required within each threshold
+    critical_vertices=None,        # List of critical vertices on the white matter mesh
+    critical_distance=0.05,        # Distance threshold for vertices near critical regions
+    reduced_max_face_area=0.0005   # Lower max face area for critical regions
 ):
     """
     Expand the ventricle mesh dynamically in stages, ensuring vertices do not cross
-    the white matter boundary. An inward offset mesh prevents overshooting.
+    the white matter boundary. Refine vertices near critical areas for smoother expansion.
 
     Parameters:
         - ventricle: Trimesh object representing the ventricle.
@@ -925,6 +812,9 @@ def expand_ventricle_dynamic_fraction_auto(
         - f_max: Maximum fraction for expansion.
         - thresholds: List of distances for each stage.
         - percentages: List of percentages of vertices required within each threshold.
+        - critical_vertices: List of critical vertices on the white matter mesh.
+        - critical_distance: Distance threshold to detect vertices near critical areas.
+        - reduced_max_face_area: Smaller max face area applied to vertices near critical regions.
 
     Returns:
         - ventricle: Expanded Trimesh object.
@@ -938,6 +828,11 @@ def expand_ventricle_dynamic_fraction_auto(
     step_counter = 1
     ventricle_steps = []
     expansion_data = []  # To store all expansion vectors and positions
+
+    # Build KDTree for critical vertices
+    critical_tree = None
+    if critical_vertices is not None:
+        critical_tree = cKDTree(white_matter.vertices[critical_vertices])
 
     print(f"Initial ventricle volume: {ventricle.volume:.4f}")
     print(f"White matter volume: {white_matter.volume:.4f}")
@@ -1018,18 +913,19 @@ def expand_ventricle_dynamic_fraction_auto(
             # Update ventricle mesh
             ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
+            # Refine mesh near critical areas
+            if critical_vertices is not None:
+                ventricle = remesh_with_local_max_edge_length(
+                    mesh=ventricle, 
+                    critical_vertices=critical_vertices, 
+                    critical_distance=0.04,  # Distance threshold for identifying critical areas
+                    local_max_edge_length=0.01  # Smaller max edge length in critical zones
+                )
+
+
             # Remesh and smooth
-            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.001)
-            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.6)
-            # Refine mesh in high-curvature patches
-            '''ventricle = refine_mesh_near_high_curvature(
-                mesh=ventricle, 
-                white_matter=white_matter, 
-                step=step_counter, 
-               white_matter_curvature_threshold=30, 
-                distance_threshold=0.04, 
-                max_iterations=1,
-            )'''
+            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.01)
+            ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.5)
 
             # Save the combined ventricular and white matter meshes
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
@@ -1074,37 +970,35 @@ def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, pet
 # Main function
 if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=20)
-    # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
-    # white_matter = refine_pyramid(white_matter, splits=4)
-    # white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=6, extrusion=0.6)
-    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.2, resolution=150, petal_amplitude=0.05, petal_frequency=3) 
+    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=4, extrusion=0.6)
+    # white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.2, resolution=150, petal_amplitude=0.05, petal_frequency=3) 
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
 
     # Find high-curvature edges
     curvature_threshold = np.deg2rad(3)  # 30 degrees threshold for curvature
-    # high_curvature_edges = find_high_curvature_edges(white_matter, curvature_threshold=curvature_threshold)
     high_curvature_vertices = find_high_curvature_vertices(white_matter, curvature_threshold=curvature_threshold)
     
     # Expand the critical region
-    expanded_vertices = expand_critical_vertices(white_matter, high_curvature_vertices, expansion_radius=0.02)
+    expanded_vertices = expand_critical_vertices(white_matter, high_curvature_vertices, expansion_radius=0.03)
 
-    # Visualize high-curvature edges
-    # visualize_high_curvature_edges(white_matter, high_curvature_edges)
-    # visualize_high_curvature_faces(white_matter, high_curvature_edges)
-    visualize_high_curvature_vertices(white_matter, expanded_vertices)
+    # Visualize high-curvature vertices
+    # visualize_high_curvature_vertices(white_matter, expanded_vertices)
 
+    # Expand the ventricle mesh with critical-area refinement
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
-        ventricle = ventricle, 
-        white_matter = white_matter, 
-        steps=1000, 
+        ventricle=ventricle,
+        white_matter=white_matter,
+        steps=200,
         f_min=0.15, 
         f_max=0.25,
-        # thresholds=[0.15, 0.09, 0.02],  # Stages with thresholds
-        thresholds=[0.08, 0.01],
-        percentages=[0.6, 0.8, 0.95]    # Required percentages
-        )
+        thresholds=[0.03, 0.01],
+        percentages=[0.6, 0.8, 0.95],
+        critical_vertices=expanded_vertices,
+        critical_distance=0.02,
+        reduced_max_face_area=0.0005
+    )
 
     print("\nFinal Expanded Ventricle Mesh:")
     print(f"Vertex count: {len(expanded_ventricle.vertices)}")
