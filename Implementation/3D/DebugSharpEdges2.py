@@ -323,7 +323,7 @@ def generate_star_polygon(center, outer_radius, inner_radius, num_points=5, extr
     mesh = trimesh.Trimesh(vertices=np.array(vertices), faces=np.array(faces))
     
     # Subdivide to refine mesh
-    iterations = 3
+    iterations = 4
     for _ in range(iterations):
         mesh = mesh.subdivide()  # Subdivide all faces
     print(f"Mesh refined: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces.")
@@ -597,6 +597,7 @@ def refine_mesh_near_high_curvature(mesh, white_matter, step,
                                     max_iterations=2):
     """
     Refine mesh resolution in areas close to high-curvature regions of another mesh.
+    Already-refined white matter regions are excluded from further refinement.
 
     Parameters:
         - mesh: Trimesh object to refine (ventricular mesh).
@@ -633,7 +634,6 @@ def refine_mesh_near_high_curvature(mesh, white_matter, step,
             high_curvature_faces.add(face1)
             high_curvature_faces.add(face2)
 
-    # Extract the 3D coordinates of high-curvature vertices
     high_curvature_vertices = np.array(list(high_curvature_vertices))  # Unique vertex indices
     high_curvature_positions = white_matter.vertices[high_curvature_vertices]  # Get their positions
 
@@ -643,17 +643,30 @@ def refine_mesh_near_high_curvature(mesh, white_matter, step,
     if step == 1:
         visualize_high_curvature_edges(white_matter, high_curvature_edges)
 
-    # Step 2: Build KDTree for high-curvature vertex positions
-    high_curvature_tree = cKDTree(high_curvature_positions)
+    # Track already refined vertices
+    used_high_curvature_indices = set()
 
-    # Step 3: Refine the ventricular mesh near high-curvature regions
+    # Step 2: Start refinement iterations
     vertices = mesh.vertices
     faces = mesh.faces
 
     for iteration in range(max_iterations):
         print(f"\nRefinement iteration {iteration + 1}")
 
-        # Find ventricular vertices near high-curvature vertices
+        # Filter unused high-curvature vertices
+        unused_indices = [i for i, idx in enumerate(high_curvature_vertices) 
+                          if idx not in used_high_curvature_indices]
+
+        if len(unused_indices) == 0:
+            print("No unused high-curvature regions remaining. Stopping refinement.")
+            break
+
+        unused_positions = high_curvature_positions[unused_indices]
+
+        # Build KDTree for unused high-curvature vertices
+        high_curvature_tree = cKDTree(unused_positions)
+
+        # Find ventricular vertices near unused high-curvature regions
         distances, indices = high_curvature_tree.query(vertices)
         close_vertices = np.where(distances < distance_threshold)[0]
 
@@ -675,7 +688,7 @@ def refine_mesh_near_high_curvature(mesh, white_matter, step,
                 centroid_index = len(new_vertices)
                 new_vertices.append(centroid)
 
-                # Split into three smaller triangles
+                # Split the face into three smaller triangles
                 new_faces.append([v0, v1, centroid_index])
                 new_faces.append([v1, v2, centroid_index])
                 new_faces.append([v2, v0, centroid_index])
@@ -690,8 +703,50 @@ def refine_mesh_near_high_curvature(mesh, white_matter, step,
 
         print(f"Subdivision complete. New vertex count: {len(vertices)}, new face count: {len(faces)}")
 
+        # Mark high-curvature vertices as used
+        used_indices = high_curvature_vertices[unused_indices[indices]] if isinstance(indices, int) else high_curvature_vertices[[unused_indices[i] for i in indices]]
+        used_high_curvature_indices.update(used_indices)
+
     print("\nRefinement complete.")
     return mesh
+
+def find_high_curvature_edges(mesh, curvature_threshold=np.deg2rad(30)):
+    """
+    Identify high-curvature edges based on angles between adjacent face normals.
+
+    Parameters:
+        - mesh: Trimesh object (white matter mesh).
+        - curvature_threshold: Angle threshold in radians to identify sharp edges.
+
+    Returns:
+        - high_curvature_edges: List of edges (pairs of vertex indices) with high curvature.
+    """
+    print("Finding high-curvature edges...")
+
+    # Compute face normals
+    face_normals = mesh.face_normals
+    edges = mesh.edges_sorted  # Unique edges
+
+    # Build adjacency between faces
+    face_adjacency, edge_indices = mesh.face_adjacency, mesh.face_adjacency_edges
+
+    high_curvature_edges = []
+
+    # Loop through adjacent face pairs
+    for (face1, face2), edge in zip(face_adjacency, edge_indices):
+        normal1 = face_normals[face1]
+        normal2 = face_normals[face2]
+
+        # Calculate the angle between the two face normals
+        angle = np.arccos(np.clip(np.dot(normal1, normal2), -1.0, 1.0))
+
+        # Check if the angle exceeds the curvature threshold
+        if angle > curvature_threshold:
+            high_curvature_edges.append(edge)
+
+    print(f"Found {len(high_curvature_edges)} high-curvature edges.")
+    return high_curvature_edges
+
 
 def visualize_high_curvature_edges(mesh, high_curvature_edges):
     """
@@ -701,7 +756,6 @@ def visualize_high_curvature_edges(mesh, high_curvature_edges):
         - mesh: Trimesh object (white matter mesh).
         - high_curvature_edges: List of high-curvature edges to highlight.
     """
-    import pyvista as pv
 
     pv_faces = np.hstack((np.full((len(mesh.faces), 1), 3), mesh.faces)).ravel()
     pv_mesh = pv.PolyData(mesh.vertices, pv_faces)
@@ -719,6 +773,7 @@ def visualize_high_curvature_edges(mesh, high_curvature_edges):
     plotter.add_legend()
     plotter.add_text("High-Curvature Edges on White Matter Mesh", font_size=12)
     plotter.show()
+
 
 
 def expand_ventricle_dynamic_fraction_auto(
@@ -836,17 +891,17 @@ def expand_ventricle_dynamic_fraction_auto(
             ventricle = trimesh.Trimesh(vertices=new_vertices, faces=ventricle.faces)
 
             # Remesh and smooth
-            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.002)
+            ventricle = remesh_to_constant_face_area(ventricle, max_face_area=0.001)
             ventricle = laplacian_smoothing(ventricle, iterations=3, lambda_factor=0.6)
             # Refine mesh in high-curvature patches
-            ventricle = refine_mesh_near_high_curvature(
+            '''ventricle = refine_mesh_near_high_curvature(
                 mesh=ventricle, 
                 white_matter=white_matter, 
                 step=step_counter, 
                white_matter_curvature_threshold=30, 
                 distance_threshold=0.04, 
                 max_iterations=1,
-            )
+            )'''
 
             # Save the combined ventricular and white matter meshes
             obj_filename = os.path.join(output_dir, f"ventricle_step_{step_counter:04d}.obj")
@@ -869,7 +924,23 @@ def expand_ventricle_dynamic_fraction_auto(
 
     return ventricle
 
+def generate_flower_shape(center, radius, resolution=200, petal_amplitude=1, petal_frequency=3):
+    u = np.linspace(0, 2 * np.pi, resolution)
+    v = np.linspace(0, np.pi, resolution)
+    u, v = np.meshgrid(u, v)
 
+    r = radius + petal_amplitude * np.sin(petal_frequency * v) * np.sin(petal_frequency * u)
+
+    x = center[0] + r * np.sin(v) * np.cos(u)
+    y = center[1] + r * np.sin(v) * np.sin(u)
+    z = center[2] + r * np.cos(v)
+
+    vertices = np.vstack((x.flatten(), y.flatten(), z.flatten())).T
+    points2D = np.vstack((u.flatten(), v.flatten())).T
+    delaunay = Delaunay(points2D)
+    faces = delaunay.simplices
+
+    return trimesh.Trimesh(vertices=vertices, faces=faces)
 
 
 # Main function
@@ -877,10 +948,18 @@ if __name__ == "__main__":
     ventricle = generate_bumpy_sphere(center=(0, 0, 0), radius=0.2, resolution=20)
     # white_matter = generate_pyramid(center=(0, 0, 0), base_length=1.0, height=1.5)
     # white_matter = refine_pyramid(white_matter, splits=4)
-    white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=6, extrusion=0.6)
+    # white_matter = generate_star_polygon(center=(0, 0, -0.3), inner_radius=0.23, outer_radius=0.6, num_points=6, extrusion=0.6)
+    white_matter = generate_flower_shape(center=(0, 0, 0), radius=0.2, resolution=150, petal_amplitude=0.1, petal_frequency=4) 
 
     white_matter_face = np.mean(white_matter.area_faces)
     print(f"Average face area of the white matter mesh: {white_matter_face}")
+
+    # Find high-curvature edges
+    curvature_threshold = np.deg2rad(10)  # 30 degrees threshold for curvature
+    high_curvature_edges = find_high_curvature_edges(white_matter, curvature_threshold=curvature_threshold)
+
+    # Visualize high-curvature edges
+    visualize_high_curvature_edges(white_matter, high_curvature_edges)
 
     expanded_ventricle = expand_ventricle_dynamic_fraction_auto(
         ventricle = ventricle, 
